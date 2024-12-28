@@ -1,0 +1,279 @@
+use crate::ast::{ASTNode, Parameter, BinaryOperator, UnaryOperator, Pattern, MatchArm};
+use crate::token::{Token, TokenKind};
+
+grammar;
+
+// Rewrite the comma list helper to be unambiguous
+CommaSeparated<T>: Vec<T> = {
+    <mut v:(<T> ",")*> <e:T?> => match e {
+        None => v,
+        Some(e) => {
+            v.push(e);
+            v
+        }
+    }
+};
+
+// Use the new helper in function declarations and call expressions
+pub Program = TopLevelItem*;
+TopLevelItem: ASTNode = FunctionDecl;
+
+FunctionDecl: ASTNode = {
+    "fn" <name:Identifier> "(" <params:CommaSeparated<Parameter>> ")" <ret:ReturnType?> <body:Block> => {
+        ASTNode::Function {
+            name,
+            params,
+            return_type: ret,
+            body,
+            is_async: false,
+        }
+    },
+    "async" "fn" <name:Identifier> "(" <params:CommaSeparated<Parameter>> ")" <ret:ReturnType?> <body:Block> => {
+        ASTNode::Function {
+            name,
+            params,
+            return_type: ret,
+            body,
+            is_async: true,
+        }
+    },
+};
+
+// Update call expressions to use the new helper
+CallExpr: ASTNode = {
+    <callee:PrimaryExpr> "(" <args:CommaSeparated<Expr>> ")" => ASTNode::CallExpression {
+        callee: Box::new(callee),
+        arguments: args,
+    },
+};
+
+// First define all statement types
+VariableDecl: ASTNode = {
+    "let" <name:Identifier> <type_:(":" <Identifier>)?> "=" <value:Expr> ";" => {
+        ASTNode::VariableDeclaration {
+            name,
+            type_annotation: type_,
+            value: Box::new(value),
+        }
+    }
+};
+
+ReturnStmt: ASTNode = {
+    "return" <e:Expr?> ";" => ASTNode::Return(e.map(Box::new)),
+};
+
+IfStmt: ASTNode = {
+    "if" <c:Expr> <t:Block> <e:("else" <Block>)?> => ASTNode::If {
+        condition: Box::new(c),
+        then_branch: t,
+        else_branch: e,
+    },
+};
+
+WhileStmt: ASTNode = {
+    "while" <c:Expr> <b:Block> => ASTNode::While {
+        condition: Box::new(c),
+        body: b,
+    },
+};
+
+ExprStmt: ASTNode = {
+    <e:Expr> ";" => ASTNode::ExpressionStatement(Box::new(e)),
+};
+
+// Then reference them in BlockStmt
+BlockStmt: ASTNode = {
+    VariableDecl,
+    ReturnStmt,
+    IfStmt,
+    WhileStmt,
+    ExprStmt,
+};
+
+Parameter: Parameter = {
+    <name:Identifier> ":" <type_annotation:Identifier> => Parameter { name, type_annotation }
+};
+
+ReturnType: String = {
+    "->" <type_:Identifier> => type_
+};
+
+Block: Vec<ASTNode> = {
+    "{" <stmt:BlockStmt*> "}" => stmt
+};
+
+// Expression precedence hierarchy
+pub Expr: ASTNode = {
+    LogicalExpr,
+};
+
+LogicalExpr: ASTNode = {
+    <l:LogicalExpr> "||" <r:ComparisonExpr> => ASTNode::BinaryOperation {
+        left: Box::new(l),
+        operator: BinaryOperator::Or,
+        right: Box::new(r),
+    },
+    <l:LogicalExpr> "&&" <r:ComparisonExpr> => ASTNode::BinaryOperation {
+        left: Box::new(l),
+        operator: BinaryOperator::And,
+        right: Box::new(r),
+    },
+    ComparisonExpr,
+};
+
+ComparisonExpr: ASTNode = {
+    <l:ComparisonExpr> "==" <r:AddExpr> => ASTNode::BinaryOperation {
+        left: Box::new(l),
+        operator: BinaryOperator::Equal,
+        right: Box::new(r),
+    },
+    <l:ComparisonExpr> "!=" <r:AddExpr> => ASTNode::BinaryOperation {
+        left: Box::new(l),
+        operator: BinaryOperator::NotEqual,
+        right: Box::new(r),
+    },
+    <l:ComparisonExpr> "<" <r:AddExpr> => ASTNode::BinaryOperation {
+        left: Box::new(l),
+        operator: BinaryOperator::LessThan,
+        right: Box::new(r),
+    },
+    <l:ComparisonExpr> "<=" <r:AddExpr> => ASTNode::BinaryOperation {
+        left: Box::new(l),
+        operator: BinaryOperator::LessThanEqual,
+        right: Box::new(r),
+    },
+    <l:ComparisonExpr> ">" <r:AddExpr> => ASTNode::BinaryOperation {
+        left: Box::new(l),
+        operator: BinaryOperator::GreaterThan,
+        right: Box::new(r),
+    },
+    <l:ComparisonExpr> ">=" <r:AddExpr> => ASTNode::BinaryOperation {
+        left: Box::new(l),
+        operator: BinaryOperator::GreaterThanEqual,
+        right: Box::new(r),
+    },
+    AddExpr,
+};
+
+AddExpr: ASTNode = {
+    <l:AddExpr> "+" <r:MulExpr> => ASTNode::BinaryOperation {
+        left: Box::new(l),
+        operator: BinaryOperator::Add,
+        right: Box::new(r),
+    },
+    <l:AddExpr> "-" <r:MulExpr> => ASTNode::BinaryOperation {
+        left: Box::new(l),
+        operator: BinaryOperator::Subtract,
+        right: Box::new(r),
+    },
+    MulExpr,
+};
+
+MulExpr: ASTNode = {
+    <l:MulExpr> "*" <r:UnaryExpr> => ASTNode::BinaryOperation {
+        left: Box::new(l),
+        operator: BinaryOperator::Multiply,
+        right: Box::new(r),
+    },
+    <l:MulExpr> "/" <r:UnaryExpr> => ASTNode::BinaryOperation {
+        left: Box::new(l),
+        operator: BinaryOperator::Divide,
+        right: Box::new(r),
+    },
+    <l:MulExpr> "%" <r:UnaryExpr> => ASTNode::BinaryOperation {
+        left: Box::new(l),
+        operator: BinaryOperator::Modulo,
+        right: Box::new(r),
+    },
+    UnaryExpr,
+};
+
+UnaryExpr: ASTNode = {
+    <op:UnaryOp> <expr:UnaryExpr> => ASTNode::UnaryOperation {
+        operator: op,
+        operand: Box::new(expr),
+    },
+    PostfixExpr,
+};
+
+PostfixExpr: ASTNode = {
+    <callee:PostfixExpr> "(" <args:CommaSeparated<Expr>> ")" => ASTNode::CallExpression {
+        callee: Box::new(callee),
+        arguments: args,
+    },
+    <obj:PostfixExpr> "." <prop:Identifier> => ASTNode::MemberAccess {
+        object: Box::new(obj),
+        property: prop,
+    },
+    PrimaryExpr,
+};
+
+PrimaryExpr: ASTNode = {
+    "(" <e:Expr> ")" => e,
+    Literal,
+    Identifier => ASTNode::Identifier(<>),
+};
+
+UnaryOp: UnaryOperator = {
+    "-" => UnaryOperator::Negate,
+    "!" => UnaryOperator::Not,
+};
+
+Literal: ASTNode = {
+    IntegerLit => ASTNode::IntegerLiteral(<>),
+    FloatLit => ASTNode::FloatLiteral(<>),
+    StringLit => ASTNode::StringLiteral(<>),
+    BooleanLit => ASTNode::BooleanLiteral(<>),
+};
+
+// Pattern matching grammar
+MatchExpr: ASTNode = {
+    "match" <e:Expr> "{" <arms:MatchArm*> "}" => ASTNode::Match {
+        scrutinee: Box::new(e),
+        arms,
+    },
+};
+
+MatchArm: MatchArm = {
+    <p:Pattern> <g:("if" <Expr>)?> "=>" <b:Block> => MatchArm {
+        pattern: p,
+        guard: g.map(Box::new),
+        body: b,
+    },
+};
+
+Pattern: Pattern = {
+    Literal => Pattern::Literal(<>),
+    Identifier => Pattern::Variable(<>),
+    "_" => Pattern::Wildcard,
+    <name:Identifier> "{" <fields:CommaSeparated<PatternField>> "}" => Pattern::Constructor {
+        name,
+        fields,
+    },
+};
+
+PatternField: Pattern = {
+    <name:Identifier> ":" <pattern:Pattern> => pattern,
+};
+
+// Lexical rules
+Identifier: String = {
+    r"[a-zA-Z_][a-zA-Z0-9_]*" => <>.to_string()
+};
+
+IntegerLit: i64 = {
+    r"[0-9]+" => i64::from_str(<>).unwrap()
+};
+
+FloatLit: f64 = {
+    r"[0-9]+\.[0-9]+" => f64::from_str(<>).unwrap()
+};
+
+StringLit: String = {
+    r#""[^"]*""# => <>[1..<>.len()-1].to_string()
+};
+
+BooleanLit: bool = {
+    "true" => true,
+    "false" => false,
+};
