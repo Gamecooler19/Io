@@ -92,9 +92,84 @@ impl BuildConfig {
                     bail!("Linux x86_64 target requires matching host architecture")
                 }
             }
-            // ...similar checks for other targets...
+            Target::X86_64Windows => {
+                if cfg!(not(all(target_arch = "x86_64", target_os = "windows"))) {
+                    bail!("Windows x86_64 target requires matching host architecture")
+                }
+            }
+            Target::Aarch64 => {
+                if cfg!(not(all(target_arch = "aarch64", target_os = "linux"))) {
+                    bail!("AArch64 target requires ARM64 Linux host architecture")
+                }
+            }
+            Target::Native => {
+                // Native target always compatible with host
+                Ok(())
+            }
+        }?;
+
+        // Verify toolchain availability
+        self.verify_toolchain_installed()?;
+        
+        // Verify required dependencies
+        self.verify_dependencies()?;
+
+        Ok(())
+    }
+
+    fn verify_toolchain_installed(&self) -> Result<()> {
+        match self.target {
+            Target::Wasm32 => {
+                if !Command::new("wasm-pack").output().is_ok() {
+                    bail!("wasm-pack not found. Please install wasm-pack for WebAssembly targets")
+                }
+            }
+            Target::X86_64Windows => {
+                if cfg!(target_os = "linux") && !Command::new("wine64").output().is_ok() {
+                    bail!("wine64 not found. Please install wine for cross-compilation to Windows")
+                }
+            }
+            Target::Aarch64 => {
+                if cfg!(target_arch = "x86_64") && !Command::new("aarch64-linux-gnu-gcc").output().is_ok() {
+                    bail!("ARM64 toolchain not found. Please install gcc-aarch64-linux-gnu")
+                }
+            }
+            _ => Ok(())
+        }?;
+        Ok(())
+    }
+
+    fn verify_dependencies(&self) -> Result<()> {
+        // Check for required system libraries
+        let required_libs = match self.target {
+            Target::X86_64Linux | Target::Aarch64 => vec!["libc.so.6", "libstdc++.so.6"],
+            Target::X86_64Windows => vec!["kernel32.dll", "user32.dll"],
+            Target::Wasm32 => vec!["Javascript runtime"],
+            Target::Native => vec![], // Native uses host system libraries
+        };
+
+        for lib in required_libs {
+            if !self.check_library_exists(lib) {
+                bail!("Required library {} not found for target {}", 
+                      lib, self.target.get_target_triple())
+            }
         }
         Ok(())
+    }
+
+    fn check_library_exists(&self, library: &str) -> bool {
+        // Simple library existence check
+        match self.target {
+            Target::X86_64Linux | Target::Aarch64 => {
+                Path::new("/usr/lib").join(library).exists() ||
+                Path::new("/usr/lib64").join(library).exists()
+            }
+            Target::X86_64Windows => {
+                Path::new("C:\\Windows\\System32").join(library).exists()
+            }
+            Target::Wasm32 => true, // Assume JS runtime is available
+            Target::Native => true,  // Assume native dependencies are met
+        }
     }
 
     pub fn with_optimization(&mut self, level: OptimizationLevel) -> &mut Self {

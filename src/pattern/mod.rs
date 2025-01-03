@@ -48,25 +48,152 @@ impl PatternMatcher {
     }
 
     fn match_constructor(&mut self, name: &str, fields: &[Pattern], value: &ASTNode) -> Result<()> {
-        // Implement constructor pattern matching
         match value {
             ASTNode::CallExpression { callee, arguments } => {
                 if let ASTNode::Identifier(callee_name) = &**callee {
-                    if callee_name == name && arguments.len() == fields.len() {
-                        // Match each field with corresponding argument
-                        for (field, arg) in fields.iter().zip(arguments) {
-                            self.match_pattern(field, arg, &Type::Unit)?; 
-                            // TODO: Get proper type
-                        }
-                        Ok(())
-                    } else {
-                        Err(IoError::runtime_error("Constructor pattern mismatch"))
+                    // Verify constructor exists
+                    let constructor_type = self.scope.lookup_type(callee_name)
+                        .ok_or_else(|| IoError::runtime_error(
+                            format!("Unknown constructor: {}", callee_name)
+                        ))?;
+
+                    // Verify arity matches
+                    if arguments.len() != fields.len() {
+                        return Err(IoError::runtime_error(format!(
+                            "Constructor {} expects {} arguments, but got {}",
+                            name,
+                            fields.len(),
+                            arguments.len()
+                        )));
                     }
+
+                    // Get field types from constructor definition
+                    let field_types = self.get_constructor_field_types(constructor_type)?;
+
+                    // Match each field with corresponding argument
+                    for ((field, arg), field_type) in fields.iter().zip(arguments).zip(field_types) {
+                        // Infer argument type
+                        let arg_type = self.infer_type(arg)?;
+                        
+                        // Verify type compatibility
+                        if !self.types_compatible(&field_type, &arg_type) {
+                            return Err(IoError::type_error(format!(
+                                "Type mismatch in constructor {}: expected {}, found {}",
+                                name, field_type, arg_type
+                            )));
+                        }
+
+                        // Match the pattern
+                        self.match_pattern(field, arg, &field_type)?;
+                    }
+
+                    Ok(())
                 } else {
-                    Err(IoError::runtime_error("Expected constructor"))
+                    Err(IoError::runtime_error("Expected constructor identifier"))
                 }
             }
-            _ => Err(IoError::runtime_error("Expected constructor call")),
+            _ => Err(IoError::runtime_error("Expected constructor application")),
+        }
+    }
+
+    fn get_constructor_field_types(&self, constructor_type: &Type) -> Result<Vec<Type>> {
+        match constructor_type {
+            Type::Constructor { fields, .. } => Ok(fields.clone()),
+            Type::Enum { variants, .. } => {
+                // Handle enum constructors
+                Ok(variants.iter()
+                    .flat_map(|v| v.fields.clone())
+                    .collect())
+            }
+            _ => Err(IoError::type_error(format!(
+                "Expected constructor type, found {:?}",
+                constructor_type
+            ))),
+        }
+    }
+
+    fn infer_type(&self, node: &ASTNode) -> Result<Type> {
+        match node {
+            ASTNode::IntegerLiteral(_) => Ok(Type::Integer),
+            ASTNode::FloatLiteral(_) => Ok(Type::Float),
+            ASTNode::StringLiteral(_) => Ok(Type::String),
+            ASTNode::BooleanLiteral(_) => Ok(Type::Boolean),
+            ASTNode::ArrayLiteral(elements) => {
+                if elements.is_empty() {
+                    Ok(Type::Array(Box::new(Type::Unknown)))
+                } else {
+                    let element_type = self.infer_type(&elements[0])?;
+                    // Verify all elements have same type
+                    for element in &elements[1..] {
+                        let t = self.infer_type(element)?;
+                        if !self.types_compatible(&element_type, &t) {
+                            return Err(IoError::type_error(
+                                "Inconsistent array element types"
+                            ));
+                        }
+                    }
+                    Ok(Type::Array(Box::new(element_type)))
+                }
+            }
+            ASTNode::Identifier(name) => {
+                self.scope.lookup_type(name)
+                    .ok_or_else(|| IoError::runtime_error(
+                        format!("Cannot infer type of undefined variable: {}", name)
+                    ))
+            }
+            ASTNode::CallExpression { callee, arguments } => {
+                if let ASTNode::Identifier(name) = &**callee {
+                    let fn_type = self.scope.lookup_type(name)
+                        .ok_or_else(|| IoError::runtime_error(
+                            format!("Unknown function: {}", name)
+                        ))?;
+                    
+                    match fn_type {
+                        Type::Function { return_type, .. } => Ok(*return_type),
+                        _ => Err(IoError::type_error("Expected function type")),
+                    }
+                } else {
+                    Err(IoError::runtime_error("Expected function identifier"))
+                }
+            }
+            _ => Err(IoError::runtime_error(
+                format!("Cannot infer type of {:?}", node)
+            )),
+        }
+    }
+
+    fn types_compatible(&self, expected: &Type, actual: &Type) -> bool {
+        match (expected, actual) {
+            // Basic type equality
+            (Type::Integer, Type::Integer) |
+            (Type::Float, Type::Float) |
+            (Type::String, Type::String) |
+            (Type::Boolean, Type::Boolean) => true,
+
+            // Array type compatibility
+            (Type::Array(t1), Type::Array(t2)) => 
+                self.types_compatible(t1, t2),
+
+            // Function type compatibility
+            (Type::Function { params: p1, return_type: r1 },
+             Type::Function { params: p2, return_type: r2 }) => {
+                p1.len() == p2.len() &&
+                p1.iter().zip(p2).all(|(t1, t2)| self.types_compatible(t1, t2)) &&
+                self.types_compatible(r1, r2)
+            }
+
+            // Constructor type compatibility
+            (Type::Constructor { name: n1, fields: f1 },
+             Type::Constructor { name: n2, fields: f2 }) => {
+                n1 == n2 && f1.len() == f2.len() &&
+                f1.iter().zip(f2).all(|(t1, t2)| self.types_compatible(t1, t2))
+            }
+
+            // Unknown type is compatible with anything
+            (_, Type::Unknown) | (Type::Unknown, _) => true,
+
+            // Everything else is incompatible
+            _ => false,
         }
     }
 }

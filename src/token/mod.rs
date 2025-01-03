@@ -1,4 +1,19 @@
-use crate::Result;
+#[derive(Debug, Clone, PartialEq)]
+pub struct Token {
+    pub kind: TokenKind,
+    pub lexeme: String,
+    pub position: usize,
+} // Added missing closing brace
+
+impl Token {
+    pub fn new(kind: TokenKind, lexeme: String, position: usize) -> Self {
+        Self {
+            kind,
+            lexeme,
+            position,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TokenKind {
@@ -50,44 +65,4 @@ pub enum TokenKind {
     Number,
 
     EOF,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct Token {
-    pub kind: TokenKind,
-    pub value: String,
-    pub position: usize,
-    pub literal: Option<LiteralValue>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum LiteralValue {
-    String(String),
-    Number(f64),
-    Boolean(bool),
-}
-
-impl Token {
-    pub fn new(kind: TokenKind, value: String, position: usize) -> Self {
-        Self {
-            kind,
-            value,
-            position,
-            literal: None,
-        }
-    }
-
-    pub fn with_literal(
-        kind: TokenKind,
-        value: String,
-        position: usize,
-        literal: LiteralValue,
-    ) -> Self {
-        Self {
-            kind,
-            value,
-            position,
-            literal: Some(literal),
-        }
-    }
 }

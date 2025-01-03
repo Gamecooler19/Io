@@ -186,39 +186,6 @@ impl Type {
     }
 }
 
-impl<'ctx> crate::codegen::IntoLLVM<'ctx> for Type {
-    type Output = BasicTypeEnum<'ctx>;
-
-    fn into_llvm(self, context: &'ctx inkwell::context::Context) -> Self::Output {
-        match self.kind {
-            TypeKind::Bool => context.bool_type().as_basic_type_enum(),
-            TypeKind::Int(width) => context.custom_width_int_type(width).as_basic_type_enum(),
-            TypeKind::Float(32) => context.f32_type().as_basic_type_enum(),
-            TypeKind::Float(64) => context.f64_type().as_basic_type_enum(),
-            TypeKind::Pointer(pointee) => {
-                let ty = pointee.into_llvm(context);
-                let address_space = self.attributes.address_space.unwrap_or(0);
-                ty.ptr_type(address_space.into()).as_basic_type_enum()
-            }
-            TypeKind::Array(element_type, Some(size)) => {
-                let ty = element_type.into_llvm(context);
-                ty.array_type(size).as_basic_type_enum()
-            }
-            TypeKind::Struct(fields, packed) => {
-                let field_types: Vec<_> =
-                    fields.into_iter().map(|f| f.into_llvm(context)).collect();
-                context
-                    .struct_type(&field_types, packed)
-                    .as_basic_type_enum()
-            }
-            _ => panic!(
-                "Type cannot be converted to LLVM basic type: {:?}",
-                self.kind
-            ),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

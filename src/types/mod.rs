@@ -2,7 +2,7 @@ pub mod checker;
 
 use crate::{error::IoError, Result};
 use inkwell::context::Context;
-use inkwell::types::{BasicType, BasicTypeEnum};
+use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum};
 use inkwell::AddressSpace;
 use std::collections::HashMap;
 use std::fmt;
@@ -16,6 +16,9 @@ pub enum Type {
     F64,
     Bool,
     Void,
+    Unit,  // Added Unit variant
+    Int,   // Added Int variant
+    Float, // Added Float variant
     String,
     Array {
         elem_type: Box<Type>,
@@ -53,19 +56,23 @@ impl Type {
 
     pub fn to_llvm_type<'ctx>(&self, context: &'ctx Context) -> BasicTypeEnum<'ctx> {
         match self {
+            Type::Int | Type::I32 => context.i32_type().into(),
+            Type::Float | Type::F32 => context.f32_type().into(),
+            Type::Unit | Type::Void => context.void_type().into(),
             Type::I8 => context.i8_type().into(),
-            Type::I32 => context.i32_type().into(),
             Type::I64 => context.i64_type().into(),
-            Type::F32 => context.f32_type().into(),
             Type::F64 => context.f64_type().into(),
             Type::Bool => context.bool_type().into(),
-            Type::String => context.i8_type().ptr_type(AddressSpace::default()).into(),
+            Type::String => context
+                .i8_type()
+                .ptr_type(inkwell::AddressSpace::default())
+                .into(),
             Type::Array { elem_type, size } => {
                 let elem_ty = elem_type.to_llvm_type(context);
                 context
-                    .get_struct_type(&[elem_ty])
+                    .struct_type(&[elem_ty], false)
                     .array_type(*size as u32)
-                    .into()
+                    .as_basic_type_enum()
             }
             Type::Function {
                 params,
@@ -73,11 +80,14 @@ impl Type {
                 ..
             } => {
                 let ret_type = return_type.to_llvm_type(context);
-                let param_types: Vec<_> = params.iter().map(|t| t.to_llvm_type(context)).collect();
-                context
-                    .get_struct_type(&[ret_type])
-                    .func_type(&param_types, false)
-                    .into()
+                let param_types: Vec<_> = params
+                    .iter()
+                    .map(|t| t.to_llvm_type(context).into())
+                    .collect();
+                ret_type
+                    .fn_type(&param_types, false)
+                    .ptr_type(AddressSpace::default())
+                    .as_basic_type_enum()
             }
             Type::Struct { fields, .. } => {
                 let field_types: Vec<_> = fields
@@ -86,7 +96,35 @@ impl Type {
                     .collect();
                 context.struct_type(&field_types, false).into()
             }
-            Type::Void => context.void_type().ptr_type(AddressSpace::default()).into(),
+        }
+    }
+
+    pub fn fn_type<'a>(
+        &self,
+        param_types: &[BasicTypeEnum<'a>],
+        is_var_args: bool,
+        context: &'a Context,
+    ) -> inkwell::types::FunctionType<'a> {
+        match self {
+            Type::Function { return_type, .. } => {
+                let ret_ty = return_type.to_llvm_type(context);
+                let param_types: Vec<BasicMetadataTypeEnum> = param_types
+                    .iter()
+                    .map(|t| t.as_basic_type_enum().into())
+                    .collect();
+                ret_ty.fn_type(&param_types, is_var_args)
+            }
+            _ => panic!("Called fn_type on non-function type"),
+        }
+    }
+
+    pub fn array_type<'a>(&self, size: u32, context: &'a Context) -> inkwell::types::ArrayType<'a> {
+        match self {
+            Type::Array { elem_type, .. } => {
+                let elem_ty = elem_type.to_llvm_type(context);
+                elem_ty.array_type(size)
+            }
+            _ => panic!("Called array_type on non-array type"),
         }
     }
 }
@@ -106,12 +144,12 @@ impl fmt::Display for Type {
                 return_type,
                 is_async,
             } => {
-                if *is_async {
+                if (*is_async) {
                     write!(f, "async ")?;
                 }
                 write!(f, "fn(")?;
                 for (i, param) in params.iter().enumerate() {
-                    if i > 0 {
+                    if (i > 0) {
                         write!(f, ", ")?;
                     }
                     write!(f, "{}", param)?;
@@ -122,7 +160,7 @@ impl fmt::Display for Type {
             Type::Struct { fields, name } => {
                 write!(f, "struct {} {{ ", name)?;
                 for (i, (field_name, field_type)) in fields.iter().enumerate() {
-                    if i > 0 {
+                    if (i > 0) {
                         write!(f, ", ")?;
                     }
                     write!(f, "{}: {}", field_name, field_type)?;
@@ -166,5 +204,49 @@ impl TypeContext {
         }
         self.types.insert(name, ty);
         Ok(())
+    }
+}
+
+impl SomeType {
+    pub fn some_method(&self, context: &Context) -> Result<inkwell::types::FunctionType<'_>> {
+        let return_type = self.get_return_type()?;
+        let ret_ty = return_type.to_llvm_type(context);
+
+        let param_types: Vec<BasicTypeEnum> = self
+            .parameters
+            .iter()
+            .map(|param| param.get_type().to_llvm_type(context))
+            .collect();
+
+        Ok(ret_ty.fn_type(&param_types, self.is_variadic))
+    }
+
+    pub fn another_method(
+        &self,
+        elem_type: &Type,
+        context: &Context,
+    ) -> Result<inkwell::types::ArrayType<'_>> {
+        let elem_ty = elem_type.to_llvm_type(context);
+
+        // Validate array size
+        if self.size == 0 {
+            return Err(IoError::type_error("Array size must be greater than 0"));
+        }
+
+        // Create array type with proper alignment
+        let array_type = match elem_ty {
+            BasicTypeEnum::IntType(int_ty) => int_ty.array_type(self.size as u32),
+            BasicTypeEnum::FloatType(float_ty) => float_ty.array_type(self.size as u32),
+            BasicTypeEnum::PointerType(ptr_ty) => ptr_ty.array_type(self.size as u32),
+            _ => return Err(IoError::type_error("Unsupported element type for array")),
+        };
+
+        Ok(array_type)
+    }
+
+    fn get_return_type(&self) -> Result<Type> {
+        self.return_type
+            .clone()
+            .ok_or_else(|| IoError::type_error("Return type not specified"))
     }
 }

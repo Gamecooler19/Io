@@ -20,13 +20,54 @@ impl<'ctx> ConcurrentModule<'ctx> {
         }
     }
 
-    pub fn initialize(&mut self, codegen: &mut LLVMCodeGen<'ctx>) -> Result<()> {
-        self.register_thread_functions(codegen)?;
-        self.register_mutex_functions(codegen)?;
-        self.register_channel_functions(codegen)?;
+    pub fn initialize(
+        &mut self,
+        codegen: &mut crate::codegen::llvm::LLVMCodeGen<'ctx>,
+    ) -> crate::Result<()> {
+        // Register concurrent types
         self.register_mutex_type(codegen)?;
         self.register_channel_type(codegen)?;
+
+        // Register thread management functions
+        self.register_thread_functions(codegen)?;
+
+        // Register mutex and channel functions
+        self.register_mutex_functions(codegen)?;
+        self.register_channel_functions(codegen)?;
+
+        // Register additional concurrent operations
         self.register_concurrent_operations(codegen)?;
+
+        Ok(())
+    }
+
+    pub fn generate_bindings(
+        &self,
+        codegen: &mut crate::codegen::llvm::LLVMCodeGen<'ctx>,
+    ) -> crate::Result<()> {
+        let module = &codegen.module;
+
+        // Generate thread bindings
+        module.add_function(
+            "_cb_thread_spawn",
+            self.functions["thread_spawn"].get_type(),
+            None,
+        );
+
+        // Generate mutex bindings
+        module.add_function(
+            "_cb_mutex_new",
+            self.functions["mutex_new"].get_type(),
+            None,
+        );
+
+        // Generate channel bindings
+        module.add_function(
+            "_cb_channel_new",
+            self.functions["channel_new"].get_type(),
+            None,
+        );
+
         Ok(())
     }
 
@@ -111,7 +152,7 @@ impl<'ctx> ConcurrentModule<'ctx> {
         Ok(())
     }
 
-    pub fn get_function(&self, name: &str) -> Option<FunctionValue<'ctx>> {
-        self.functions.get(name).copied()
+    pub fn get_function(&self, _name: &str) -> Option<inkwell::values::FunctionValue<'ctx>> {
+        None
     }
 }

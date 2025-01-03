@@ -1,11 +1,10 @@
+use crate::codegen::debug::{DebugInfo, SourceLocation};
 use crate::{
-    ast::{ASTNode, ASTVisitor, BinaryOperator, Parameter},
+    ast::{ASTNode, BinaryOperator, Function, Module as AstModule},
     error::IoError,
-    types::Type,
     Result,
 };
 use inkwell::{
-    basic_block::BasicBlock,
     builder::Builder,
     context::Context,
     debug_info::{
@@ -14,11 +13,12 @@ use inkwell::{
     },
     module::Module,
     passes::PassManager,
+    targets::{CodeModel, FileType, RelocMode, Target, TargetMachine},
     types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum},
-    values::{BasicValue, BasicValueEnum, FunctionValue},
+    values::{BasicValue, BasicValueEnum, CallSiteValue, FunctionValue},
     AddressSpace, OptimizationLevel,
 };
-use std::collections::HashMap;
+use std::collections::HashMap; // Add if not imported
 
 pub struct LLVMCodeGen<'ctx> {
     pub(crate) context: &'ctx Context,
@@ -27,7 +27,6 @@ pub struct LLVMCodeGen<'ctx> {
     named_values: HashMap<String, BasicValueEnum<'ctx>>,
     current_function: Option<FunctionValue<'ctx>>,
     optimization_level: OptimizationLevel,
-    debug_info: DebugInfo<'ctx>,
     function_pass_manager: inkwell::passes::PassManager<FunctionValue<'ctx>>,
     types: HashMap<String, BasicTypeEnum<'ctx>>,
 }
@@ -63,7 +62,6 @@ impl<'ctx> LLVMCodeGen<'ctx> {
             named_values: HashMap::new(),
             current_function: None,
             optimization_level: OptimizationLevel::Default,
-            debug_info,
             function_pass_manager,
             types: HashMap::new(),
         }
@@ -113,11 +111,47 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                     BinaryOperator::Divide => {
                         self.builder.build_int_signed_div(l, r, "divtmp").into()
                     }
-                    // Add more operators...
+                    BinaryOperator::Modulo => {
+                        self.builder.build_int_signed_rem(l, r, "modtmp").into()
+                    }
+                    BinaryOperator::BitwiseAnd => self.builder.build_and(l, r, "andtmp").into(),
+                    BinaryOperator::BitwiseOr => self.builder.build_or(l, r, "ortmp").into(),
+                    BinaryOperator::BitwiseXor => self.builder.build_xor(l, r, "xortmp").into(),
+                    BinaryOperator::LeftShift => {
+                        self.builder.build_left_shift(l, r, "lshifttmp").into()
+                    }
+                    BinaryOperator::RightShift => self
+                        .builder
+                        .build_right_shift(l, r, false, "rshifttmp")
+                        .into(),
                     _ => return Err(IoError::runtime_error("Unsupported binary operator")),
                 })
             }
-            // Add support for other types (float, etc.)
+            (l, r) if l.is_float_type() && r.is_float_type() => {
+                let l = left.into_float_value();
+                let r = right.into_float_value();
+                Ok(match op {
+                    BinaryOperator::Add => self.builder.build_float_add(l, r, "faddtmp").into(),
+                    BinaryOperator::Subtract => {
+                        self.builder.build_float_sub(l, r, "fsubtmp").into()
+                    }
+                    BinaryOperator::Multiply => {
+                        self.builder.build_float_mul(l, r, "fmultmp").into()
+                    }
+                    BinaryOperator::Divide => self.builder.build_float_div(l, r, "fdivtmp").into(),
+                    BinaryOperator::Modulo => self.builder.build_float_rem(l, r, "fmodtmp").into(),
+                    _ => return Err(IoError::runtime_error("Unsupported float operation")),
+                })
+            }
+            (l, r) if l.is_struct_type() && r.is_struct_type() => {
+                self.handle_struct_operation(op, left, right)
+            }
+            (l, r) if l.is_array_type() && r.is_array_type() => {
+                self.handle_array_operation(op, left, right)
+            }
+            (l, r) if l.is_vector_type() && r.is_vector_type() => {
+                self.handle_vector_operation(op, left, right)
+            }
             _ => Err(IoError::runtime_error(
                 "Invalid operand types for binary operator",
             )),
@@ -146,7 +180,7 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         line: u32,
     ) -> DISubprogram<'ctx> {
         self.debug_info.create_function(
-            scope,
+            file,
             name,
             linkage_name,
             file,
@@ -239,7 +273,43 @@ impl<'ctx> LLVMCodeGen<'ctx> {
                 ),
                 None,
             ),
-            // Add more intrinsics...
+            "memset" => self.module.add_function(
+                "llvm.memset.p0i8.i64",
+                self.context.void_type().fn_type(
+                    &[
+                        self.context
+                            .i8_type()
+                            .ptr_type(AddressSpace::Generic)
+                            .into(),
+                        self.context.i8_type().into(),
+                        self.context.i64_type().into(),
+                        self.context.bool_type().into(),
+                    ],
+                    false,
+                ),
+                None,
+            ),
+            "sqrt" => self.module.add_function(
+                "llvm.sqrt.f64",
+                self.f64_type().fn_type(&[self.f64_type().into()], false),
+                None,
+            ),
+            "sin" => self.module.add_function(
+                "llvm.sin.f64",
+                self.f64_type().fn_type(&[self.f64_type().into()], false),
+                None,
+            ),
+            "cos" => self.module.add_function(
+                "llvm.cos.f64",
+                self.f64_type().fn_type(&[self.f64_type().into()], false),
+                None,
+            ),
+            "pow" => self.module.add_function(
+                "llvm.pow.f64",
+                self.f64_type()
+                    .fn_type(&[self.f64_type().into(), self.f64_type().into()], false),
+                None,
+            ),
             _ => {
                 return Err(IoError::runtime_error(format!(
                     "Unknown intrinsic: {}",
@@ -343,15 +413,449 @@ impl<'ctx> LLVMCodeGen<'ctx> {
         ret_type: BasicTypeEnum<'ctx>,
         param_types: &[BasicMetadataTypeEnum<'ctx>],
     ) -> Result<()> {
+        // Create function type
         let fn_type = ret_type.fn_type(param_types, false);
-        // ...existing code...
+
+        // Create the function
+        let function =
+            self.module
+                .add_function(&format!("func_{}", self.function_counter), fn_type, None);
+        self.function_counter += 1;
+
+        // Create entry block
+        let entry_block = self.context.append_basic_block(function, "entry");
+        self.builder.position_at_end(entry_block);
+
+        // Set up function parameters
+        for (i, param) in function.get_param_iter().enumerate() {
+            let param_name = format!("param_{}", i);
+            let alloca = self.builder.build_alloca(param.get_type(), &param_name);
+            self.builder.build_store(alloca, param);
+            self.variables.insert(param_name, alloca.into());
+        }
+
+        // Add debug info if enabled
+        if self.debug_info_enabled {
+            self.add_function_debug_info(&function)?;
+        }
+
+        // Add function to optimization pass manager
+        self.function_pass_manager.run_on(&function);
+
         Ok(())
+    }
+
+    fn add_function_debug_info(&self, function: &FunctionValue<'ctx>) -> Result<()> {
+        let file = self
+            .debug_builder
+            .create_file(&self.current_file, &self.current_directory);
+
+        let scope = self.debug_builder.create_function(
+            file,
+            &function.get_name().to_string_lossy(),
+            None,
+            file,
+            self.current_line,
+            false,
+            true,
+            self.current_line,
+            0,
+            false,
+        );
+
+        self.debug_builder.set_current_debug_location(
+            self.current_line,
+            self.current_column,
+            scope,
+            None,
+        );
+
+        Ok(())
+    }
+
+    pub fn build_struct_gep(
+        &self,
+        ptr: inkwell::values::PointerValue<'ctx>,
+        field_idx: u32,
+        name: &str,
+    ) -> Result<inkwell::values::PointerValue<'ctx>> {
+        unsafe {
+            self.builder
+                .build_struct_gep(ptr, field_idx, name)
+                .map_err(IoError::from)
+        }
+    }
+
+    pub fn build_load(
+        &self,
+        ptr: inkwell::values::PointerValue<'ctx>,
+        name: &str,
+    ) -> Result<inkwell::values::BasicValueEnum<'ctx>> {
+        self.builder
+            .build_load(ptr.get_type(), ptr, name)
+            .map_err(IoError::from)
+    }
+
+    pub fn build_call(
+        &self,
+        function: FunctionValue<'ctx>,
+        args: &[BasicValueEnum<'ctx>],
+        name: &str,
+    ) -> Result<CallSiteValue<'ctx>> {
+        self.builder
+            .build_call(function, args, name)
+            .map_err(IoError::from)
+    }
+
+    fn build_binary_op(
+        &self,
+        op: &BinaryOperator,
+        left: BasicValueEnum<'ctx>,
+        right: BasicValueEnum<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>> {
+        let result = match op {
+            BinaryOperator::Add => {
+                let result = self.builder.build_int_add(
+                    left.into_int_value(),
+                    right.into_int_value(),
+                    "addtmp",
+                );
+                Ok(result.into())
+            }
+            BinaryOperator::Subtract => {
+                let result = self.builder.build_int_sub(
+                    left.into_int_value(),
+                    right.into_int_value(),
+                    "subtmp",
+                );
+                Ok(result.into())
+            }
+            BinaryOperator::Multiply => {
+                let result = self.builder.build_int_mul(
+                    left.into_int_value(),
+                    right.into_int_value(),
+                    "multmp",
+                );
+                Ok(result.into())
+            }
+            BinaryOperator::Divide => {
+                let result = self.builder.build_int_signed_div(
+                    left.into_int_value(),
+                    right.into_int_value(),
+                    "divtmp",
+                );
+                Ok(result.into())
+            }
+            BinaryOperator::Equal => {
+                let cmp = self.builder.build_int_compare(
+                    inkwell::IntPredicate::EQ,
+                    left.into_int_value(),
+                    right.into_int_value(),
+                    "cmptmp",
+                );
+                let result =
+                    self.builder
+                        .build_int_z_extend(cmp, self.context.i32_type(), "booltmp");
+                Ok(result.into())
+            }
+            BinaryOperator::NotEqual => {
+                let cmp = self.builder.build_int_compare(
+                    inkwell::IntPredicate::NE,
+                    left.into_int_value(),
+                    right.into_int_value(),
+                    "cmptmp",
+                );
+                let result =
+                    self.builder
+                        .build_int_z_extend(cmp, self.context.i32_type(), "booltmp");
+                Ok(result.into())
+            }
+            BinaryOperator::LessThan => {
+                let cmp = self.builder.build_int_compare(
+                    inkwell::IntPredicate::SLT,
+                    left.into_int_value(),
+                    right.into_int_value(),
+                    "cmptmp",
+                );
+                let result =
+                    self.builder
+                        .build_int_z_extend(cmp, self.context.i32_type(), "booltmp");
+                Ok(result.into())
+            }
+            BinaryOperator::LessThanOrEqual => {
+                let cmp = self.builder.build_int_compare(
+                    inkwell::IntPredicate::SLE,
+                    left.into_int_value(),
+                    right.into_int_value(),
+                    "cmptmp",
+                );
+                let result =
+                    self.builder
+                        .build_int_z_extend(cmp, self.context.i32_type(), "booltmp");
+                Ok(result.into())
+            }
+            BinaryOperator::GreaterThan => {
+                let cmp = self.builder.build_int_compare(
+                    inkwell::IntPredicate::SGT,
+                    left.into_int_value(),
+                    right.into_int_value(),
+                    "cmptmp",
+                );
+                let result =
+                    self.builder
+                        .build_int_z_extend(cmp, self.context.i32_type(), "booltmp");
+                Ok(result.into())
+            }
+            BinaryOperator::GreaterThanOrEqual => {
+                let cmp = self.builder.build_int_compare(
+                    inkwell::IntPredicate::SGE,
+                    left.into_int_value(),
+                    right.into_int_value(),
+                    "cmptmp",
+                );
+                let result =
+                    self.builder
+                        .build_int_z_extend(cmp, self.context.i32_type(), "booltmp");
+                Ok(result.into())
+            }
+            BinaryOperator::BitAnd => self.builder.build_and(
+                left.into_int_value(),
+                right.into_int_value(),
+                "bitandtmp",
+            )?,
+            BinaryOperator::BitOr => {
+                self.builder
+                    .build_or(left.into_int_value(), right.into_int_value(), "bitortmp")?
+            }
+            BinaryOperator::BitXor => self.builder.build_xor(
+                left.into_int_value(),
+                right.into_int_value(),
+                "bitxortmp",
+            )?,
+            BinaryOperator::LeftShift => self.builder.build_left_shift(
+                left.into_int_value(),
+                right.into_int_value(),
+                "shltmp",
+            )?,
+            BinaryOperator::RightShift => self.builder.build_right_shift(
+                left.into_int_value(),
+                right.into_int_value(),
+                false,
+                "shrtmp",
+            )?,
+            BinaryOperator::Power => {
+                let pow_intrinsic = self.get_or_insert_intrinsic("llvm.pow")?;
+                let call = self.builder.build_call(
+                    pow_intrinsic,
+                    &[
+                        left.into_float_value().into(),
+                        right.into_float_value().into(),
+                    ],
+                    "powtmp",
+                )?;
+                call.try_as_basic_value().left().unwrap()
+            }
+            _ => Err(IoError::runtime_error("Unsupported binary operator")),
+        };
+
+        Ok(result.into())
+    }
+
+    fn build_function_call(
+        &self,
+        function: FunctionValue<'ctx>,
+        args: &[BasicValueEnum<'ctx>],
+        name: &str,
+    ) -> Result<BasicValueEnum<'ctx>> {
+        let metadata_args: Vec<BasicMetadataTypeEnum> =
+            args.iter().map(|&arg| arg.into()).collect();
+
+        let call_site = self
+            .builder
+            .build_call(function, &metadata_args, name)
+            .map_err(IoError::from)?;
+
+        self.convert_to_basic_value(call_site)
+    }
+
+    fn convert_to_basic_value(
+        &self,
+        value: inkwell::values::CallSiteValue<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>> {
+        value
+            .try_as_basic_value()
+            .left()
+            .ok_or_else(|| IoError::codegen_error("Failed to convert call result to basic value"))
+    }
+
+    pub fn array_type(&self, element_type: BasicTypeEnum<'ctx>, size: u32) -> BasicTypeEnum<'ctx> {
+        element_type.array_type(size).as_basic_type_enum()
+    }
+
+    pub fn struct_type(
+        &self,
+        field_types: &[BasicTypeEnum<'ctx>],
+        name: Option<&str>,
+    ) -> BasicTypeEnum<'ctx> {
+        let struct_type = self.context.struct_type(field_types, false);
+        if let Some(name) = name {
+            struct_type.set_name(name);
+        }
+        struct_type.as_basic_type_enum()
+    }
+
+    pub fn vector_type(&self, element_type: BasicTypeEnum<'ctx>, size: u32) -> BasicTypeEnum<'ctx> {
+        element_type.vec_type(size).as_basic_type_enum()
+    }
+
+    fn convert_type(
+        &self,
+        value: BasicValueEnum<'ctx>,
+        target_type: BasicTypeEnum<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>> {
+        match (value.get_type(), target_type) {
+            (t1, t2) if t1.is_int_type() && t2.is_int_type() => {
+                let from_bits = t1.into_int_type().get_bit_width();
+                let to_bits = t2.into_int_type().get_bit_width();
+                Ok(if from_bits < to_bits {
+                    self.builder
+                        .build_int_s_extend(value.into_int_value(), t2.into_int_type(), "ext")
+                        .into()
+                } else {
+                    self.builder
+                        .build_int_truncate(value.into_int_value(), t2.into_int_type(), "trunc")
+                        .into()
+                })
+            }
+            (t1, t2) if t1.is_float_type() && t2.is_float_type() => Ok(self
+                .builder
+                .build_float_cast(value.into_float_value(), t2.into_float_type(), "fcast")
+                .into()),
+            (t1, t2) if t1.is_int_type() && t2.is_float_type() => Ok(self
+                .builder
+                .build_signed_int_to_float(
+                    value.into_int_value(),
+                    t2.into_float_type(),
+                    "int2float",
+                )
+                .into()),
+            (t1, t2) if t1.is_float_type() && t2.is_int_type() => Ok(self
+                .builder
+                .build_float_to_signed_int(
+                    value.into_float_value(),
+                    t2.into_int_type(),
+                    "float2int",
+                )
+                .into()),
+            _ => Err(IoError::type_error("Unsupported type conversion")),
+        }
+    }
+
+    fn handle_struct_operation(
+        &self,
+        op: &BinaryOperator,
+        left: BasicValueEnum<'ctx>,
+        right: BasicValueEnum<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>> {
+        match op {
+            BinaryOperator::Equal => self.build_struct_comparison(left, right, true),
+            BinaryOperator::NotEqual => self.build_struct_comparison(left, right, false),
+            _ => Err(IoError::runtime_error("Unsupported struct operation")),
+        }
+    }
+
+    fn handle_array_operation(
+        &self,
+        op: &BinaryOperator,
+        left: BasicValueEnum<'ctx>,
+        right: BasicValueEnum<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>> {
+        match op {
+            BinaryOperator::Add => self.build_array_concatenation(left, right),
+            _ => Err(IoError::runtime_error("Unsupported array operation")),
+        }
+    }
+
+    fn handle_vector_operation(
+        &self,
+        op: &BinaryOperator,
+        left: BasicValueEnum<'ctx>,
+        right: BasicValueEnum<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>> {
+        let l = left.into_vector_value();
+        let r = right.into_vector_value();
+        Ok(match op {
+            BinaryOperator::Add => self.builder.build_vector_add(l, r, "vector_add").into(),
+            BinaryOperator::Multiply => self.builder.build_vector_mul(l, r, "vector_mul").into(),
+            _ => return Err(IoError::runtime_error("Unsupported vector operation")),
+        })
+    }
+
+    fn convert_value(
+        &self,
+        value: BasicValueEnum<'ctx>,
+        target_type: BasicTypeEnum<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>> {
+        match (value.get_type(), target_type) {
+            // Integer conversions
+            (t1, t2) if t1.is_int_type() && t2.is_int_type() => {
+                let source_bits = t1.into_int_type().get_bit_width();
+                let target_bits = t2.into_int_type().get_bit_width();
+
+                Ok(if source_bits < target_bits {
+                    self.builder
+                        .build_int_s_extend(value.into_int_value(), t2.into_int_type(), "ext")
+                        .into()
+                } else if source_bits > target_bits {
+                    self.builder
+                        .build_int_truncate(value.into_int_value(), t2.into_int_type(), "trunc")
+                        .into()
+                } else {
+                    value
+                })
+            }
+            // Float conversions
+            (t1, t2) if t1.is_float_type() && t2.is_float_type() => Ok(self
+                .builder
+                .build_float_cast(value.into_float_value(), t2.into_float_type(), "float_cast")
+                .into()),
+            // Integer to float
+            (t1, t2) if t1.is_int_type() && t2.is_float_type() => Ok(self
+                .builder
+                .build_signed_int_to_float(
+                    value.into_int_value(),
+                    t2.into_float_type(),
+                    "int2float",
+                )
+                .into()),
+            // Float to integer
+            (t1, t2) if t1.is_float_type() && t2.is_int_type() => Ok(self
+                .builder
+                .build_float_to_signed_int(
+                    value.into_float_value(),
+                    t2.into_int_type(),
+                    "float2int",
+                )
+                .into()),
+            // Pointer conversions
+            (t1, t2) if t1.is_pointer_type() && t2.is_pointer_type() => Ok(self
+                .builder
+                .build_pointer_cast(
+                    value.into_pointer_value(),
+                    t2.into_pointer_type(),
+                    "ptr_cast",
+                )
+                .into()),
+            _ => Err(IoError::type_error(format!(
+                "Unsupported type conversion from {:?} to {:?}",
+                value.get_type(),
+                target_type
+            ))),
+        }
     }
 }
 
-impl<'ctx> ASTVisitor for LLVMCodeGen<'ctx> {
-    type Output = BasicValueEnum<'ctx>;
-
+impl<'ctx> LLVMCodeGen<'ctx> {
     fn visit_function(
         &mut self,
         name: &str,
@@ -359,7 +863,7 @@ impl<'ctx> ASTVisitor for LLVMCodeGen<'ctx> {
         return_type: &Option<String>,
         body: &[ASTNode],
         is_async: bool,
-    ) -> Result<Self::Output> {
+    ) -> Result<BasicValueEnum<'ctx>> {
         let ret_type = self.get_llvm_type(return_type.as_deref().unwrap_or("unit"))?;
         let param_types: Vec<_> = params
             .iter()
@@ -400,7 +904,7 @@ impl<'ctx> ASTVisitor for LLVMCodeGen<'ctx> {
         }
     }
 
-    fn visit_node(&mut self, node: &ASTNode) -> Result<Self::Output> {
+    fn visit_node(&mut self, node: &ASTNode) -> Result<BasicValueEnum<'ctx>> {
         match node {
             ASTNode::Function {
                 name,
@@ -449,7 +953,7 @@ impl<'ctx> ASTVisitor for LLVMCodeGen<'ctx> {
         op: &BinaryOperator,
         left: &ASTNode,
         right: &ASTNode,
-    ) -> Result<Self::Output> {
+    ) -> Result<BasicValueEnum<'ctx>> {
         let lhs = self.visit_node(left)?;
         let rhs = self.visit_node(right)?;
 
@@ -558,6 +1062,38 @@ impl<'ctx> ASTVisitor for LLVMCodeGen<'ctx> {
                         .build_int_z_extend(cmp, self.context.i32_type(), "booltmp");
                 Ok(result.into())
             }
+            BinaryOperator::BitAnd => {
+                self.builder
+                    .build_and(lhs.into_int_value(), rhs.into_int_value(), "bitandtmp")?
+            }
+            BinaryOperator::BitOr => {
+                self.builder
+                    .build_or(lhs.into_int_value(), rhs.into_int_value(), "bitortmp")?
+            }
+            BinaryOperator::BitXor => {
+                self.builder
+                    .build_xor(lhs.into_int_value(), rhs.into_int_value(), "bitxortmp")?
+            }
+            BinaryOperator::LeftShift => self.builder.build_left_shift(
+                lhs.into_int_value(),
+                rhs.into_int_value(),
+                "shltmp",
+            )?,
+            BinaryOperator::RightShift => self.builder.build_right_shift(
+                lhs.into_int_value(),
+                rhs.into_int_value(),
+                false,
+                "shrtmp",
+            )?,
+            BinaryOperator::Power => {
+                let pow_intrinsic = self.get_or_insert_intrinsic("llvm.pow")?;
+                let call = self.builder.build_call(
+                    pow_intrinsic,
+                    &[lhs.into_float_value().into(), rhs.into_float_value().into()],
+                    "powtmp",
+                )?;
+                call.try_as_basic_value().left().unwrap()
+            }
             _ => Err(IoError::runtime_error("Unsupported binary operator")),
         }
     }
@@ -567,7 +1103,7 @@ impl<'ctx> ASTVisitor for LLVMCodeGen<'ctx> {
         condition: &ASTNode,
         then_branch: &[ASTNode],
         else_branch: &Option<Vec<ASTNode>>,
-    ) -> Result<Self::Output> {
+    ) -> Result<BasicValueEnum<'ctx>> {
         let cond_val = self.visit_node(condition)?;
         let current_fn = self
             .current_function
@@ -601,7 +1137,11 @@ impl<'ctx> ASTVisitor for LLVMCodeGen<'ctx> {
         Ok(self.context.i32_type().const_zero().into())
     }
 
-    fn visit_while(&mut self, condition: &ASTNode, body: &[ASTNode]) -> Result<Self::Output> {
+    fn visit_while(
+        &mut self,
+        condition: &ASTNode,
+        body: &[ASTNode],
+    ) -> Result<BasicValueEnum<'ctx>> {
         let current_fn = self
             .current_function
             .ok_or_else(|| IoError::runtime_error("While loop outside function"))?;
@@ -636,7 +1176,7 @@ impl<'ctx> ASTVisitor for LLVMCodeGen<'ctx> {
         name: &str,
         initializer: &Option<ASTNode>,
         type_annotation: &Option<String>,
-    ) -> Result<Self::Output> {
+    ) -> Result<BasicValueEnum<'ctx>> {
         let var_type = if let Some(type_name) = type_annotation {
             self.get_llvm_type(type_name)?
         } else if let Some(init) = initializer {
@@ -658,7 +1198,7 @@ impl<'ctx> ASTVisitor for LLVMCodeGen<'ctx> {
         Ok(alloca)
     }
 
-    fn visit_return(&mut self, value: &Option<ASTNode>) -> Result<Self::Output> {
+    fn visit_return(&mut self, value: &Option<ASTNode>) -> Result<BasicValueEnum<'ctx>> {
         let return_value = if let Some(expr) = value {
             Some(self.visit_node(expr)?)
         } else {
@@ -674,6 +1214,139 @@ impl<'ctx> ASTVisitor for LLVMCodeGen<'ctx> {
                 self.builder.build_return(None);
                 Ok(self.context.i32_type().const_zero().into())
             }
+        }
+    }
+}
+
+pub struct LLVMImplementation<'ctx> {
+    pub context: &'ctx Context,
+}
+
+impl<'ctx> LLVMImplementation<'ctx> {
+    pub fn new(context: &'ctx Context) -> Self {
+        Self { context }
+    }
+
+    pub fn finalize(&self) -> Result<(), IoError> {
+        // Verify module integrity
+        self.verify_module()?;
+
+        // Run optimization passes
+        self.run_optimization_passes()?;
+
+        // Generate final output
+        self.generate_output()?;
+
+        Ok(())
+    }
+
+    fn verify_module(&self) -> Result<(), String> {
+        // Verify each function
+        for function in self.module.get_functions() {
+            if !function.verify(true) {
+                return Err(format!(
+                    "Function verification failed: {}",
+                    function.get_name().to_string_lossy()
+                ));
+            }
+        }
+
+        // Verify the entire module
+        if self.module.verify().is_err() {
+            return Err("Module verification failed".to_string());
+        }
+
+        // Check for unresolved symbols
+        if let Some(missing) = self.find_unresolved_symbols() {
+            return Err(format!("Unresolved symbols found: {:?}", missing));
+        }
+
+        Ok(())
+    }
+
+    fn run_optimization_passes(&self) -> Result<(), IoError> {
+        // Create module pass manager
+        let pass_manager = PassManager::create(());
+
+        // Add analysis passes
+        pass_manager.add_promote_memory_to_register_pass();
+        pass_manager.add_instruction_combining_pass();
+        pass_manager.add_reassociate_pass();
+        pass_manager.add_gvn_pass();
+        pass_manager.add_cfg_simplification_pass();
+
+        // Add aggressive optimization passes if enabled
+        if self.optimization_level >= OptimizationLevel::Aggressive {
+            pass_manager.add_function_inlining_pass();
+            pass_manager.add_global_dce_pass();
+            pass_manager.add_constant_propagation_pass();
+            pass_manager.add_dead_store_elimination_pass();
+            pass_manager.add_aggressive_dce_pass();
+
+            // Loop optimizations
+            pass_manager.add_loop_unroll_pass();
+            pass_manager.add_loop_vectorize_pass();
+            pass_manager.add_slp_vectorize_pass();
+            pass_manager.add_loop_deletion_pass();
+
+            // More aggressive optimizations
+            pass_manager.add_tail_call_elimination_pass();
+            pass_manager.add_memcpy_optimize_pass();
+            pass_manager.add_bit_tracking_dce_pass();
+            pass_manager.add_partial_inlining_pass();
+        }
+
+        // Run the pass manager
+        pass_manager.run_on(&self.module);
+
+        Ok(())
+    }
+
+    fn generate_output(&self) -> Result<(), IoError> {
+        // Generate object file
+        let target_triple = TargetMachine::get_default_triple();
+        let target = Target::from_triple(&target_triple)
+            .map_err(|e| IoError::codegen_error(format!("Failed to get target: {}", e)))?;
+
+        let target_machine = target
+            .create_target_machine(
+                &target_triple,
+                "generic",
+                "",
+                OptimizationLevel::Default,
+                RelocMode::Default,
+                CodeModel::Default,
+            )
+            .ok_or_else(|| IoError::codegen_error("Failed to create target machine"))?;
+
+        // Write object file
+        target_machine
+            .write_to_file(&self.module, FileType::Object, "output.o")
+            .map_err(|e| IoError::codegen_error(format!("Failed to write object file: {}", e)))?;
+
+        // Generate LLVM IR for debugging
+        if self.emit_ir {
+            self.module
+                .print_to_file("output.ll")
+                .map_err(|e| IoError::codegen_error(format!("Failed to write IR file: {}", e)))?;
+        }
+
+        Ok(())
+    }
+
+    fn find_unresolved_symbols(&self) -> Option<Vec<String>> {
+        let mut unresolved = Vec::new();
+
+        for function in self.module.get_functions() {
+            if function.is_declaration() {
+                unresolved.push(function.get_name().to_string_lossy().to_string());
+            }
+        }
+
+        if unresolved.is_empty() {
+            None
+        } else {
+            Some(unresolved)
         }
     }
 }

@@ -8,7 +8,7 @@ description = "Io Programming Language Implementation"
 [dependencies]
 nom = "7.1"
 lalrpop-util = "0.20"
-inkwell = { git = "https://github.com/TheDan64/inkwell", branch = "master", features = ["llvm15-0"] }
+inkwell = { git = "https://github.com/TheDan64/inkwell", branch = "master", features = ["llvm12-0"] }
 clap = { version = "4.4", features = ["derive"] }
 thiserror = "1.0"
 log = "0.4"
@@ -24,6 +24,8 @@ reqwest = { version = "0.11", features = ["json"] }
 regex = "1.5"
 walkdir = "2.3"
 semver = "1.0"
+futures = "0.3"
+pin-utils = "0.1"
 
 [build-dependencies]
 lalrpop = "0.19"

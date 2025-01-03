@@ -33,16 +33,8 @@ impl<'ctx> IRGenerator<'ctx> {
         let builder = context.create_builder();
         let fpm = PassManager::create(&module);
 
-        // Add optimization passes
-        fpm.add_instruction_combining_pass();
-        fpm.add_reassociate_pass();
-        fpm.add_gvn_pass();
-        fpm.add_cfg_simplification_pass();
-        fpm.add_basic_alias_analysis_pass();
-        fpm.add_promote_memory_to_register_pass();
-        fpm.initialize();
-
-        Self {
+        // Create new instance
+        let mut generator = Self {
             context,
             module,
             builder,
@@ -50,7 +42,34 @@ impl<'ctx> IRGenerator<'ctx> {
             variables: HashMap::new(),
             current_function: None,
             optimization_level: OptimizationLevel::Default,
-        }
+        };
+
+        // Initialize optimization passes
+        generator.configure_optimization_passes();
+        generator.function_pass_manager.initialize();
+
+        generator
+    }
+
+    fn configure_optimization_passes(&mut self) {
+        // Analysis passes
+        self.function_pass_manager.add_basic_alias_analysis_pass();
+        self.function_pass_manager.add_type_based_alias_analysis_pass();
+        
+        // Memory optimizations
+        self.function_pass_manager.add_promote_memory_to_register_pass();
+        self.function_pass_manager.add_memory_to_register_promotion_pass();
+        self.function_pass_manager.add_dead_store_elimination_pass();
+        
+        // Control flow optimizations
+        self.function_pass_manager.add_cfg_simplification_pass();
+        self.function_pass_manager.add_jump_threading_pass();
+        self.function_pass_manager.add_loop_simplify_pass();
+        
+        // Expression optimizations
+        self.function_pass_manager.add_instruction_combining_pass();
+        self.function_pass_manager.add_reassociate_pass();
+        self.function_pass_manager.add_gvn_pass();
     }
 
     pub fn generate_ir(&mut self, ast: &ASTNode, cfg: &ControlFlowGraph) -> Result<()> {
@@ -117,12 +136,87 @@ impl<'ctx> IRGenerator<'ctx> {
 
     fn get_llvm_type(&self, type_name: &str) -> Result<BasicTypeEnum<'ctx>> {
         match type_name {
+            // Integer types
+            "i8" => Ok(self.context.i8_type().into()),
+            "i16" => Ok(self.context.i16_type().into()),
+            "i32" => Ok(self.context.i32_type().into()),
+            "i64" => Ok(self.context.i64_type().into()),
             "int" => Ok(self.context.i64_type().into()),
+            
+            // Floating point types
+            "f32" => Ok(self.context.f32_type().into()),
+            "f64" => Ok(self.context.f64_type().into()),
             "float" => Ok(self.context.f64_type().into()),
+            
+            // Other primitive types
             "bool" => Ok(self.context.bool_type().into()),
-            // Add more types...
+            "char" => Ok(self.context.i8_type().into()),
+            "void" => Ok(self.context.i8_type().ptr_type(Default::default()).into()),
+            
+            // String type
+            "string" => Ok(self.context.i8_type().ptr_type(Default::default()).into()),
+            
+            // Array types
+            s if s.starts_with("array<") => {
+                let inner_type = s.trim_start_matches("array<").trim_end_matches('>');
+                let element_type = self.get_llvm_type(inner_type)?;
+                Ok(element_type.array_type(0).into())
+            }
+            
+            // Vector types
+            s if s.starts_with("vector<") => {
+                let parts: Vec<_> = s.trim_start_matches("vector<").trim_end_matches('>').split(',').collect();
+                if parts.len() != 2 {
+                    return Err(IoError::type_error("Invalid vector type format"));
+                }
+                let element_type = self.get_llvm_type(parts[0].trim())?;
+                let size = parts[1].trim().parse::<u32>()
+                    .map_err(|_| IoError::type_error("Invalid vector size"))?;
+                Ok(element_type.vec_type(size).into())
+            }
+            
+            // Pointer types
+            s if s.starts_with("ptr<") => {
+                let inner_type = s.trim_start_matches("ptr<").trim_end_matches('>');
+                let pointee_type = self.get_llvm_type(inner_type)?;
+                Ok(pointee_type.ptr_type(Default::default()).into())
+            }
+            
+            // Function types
+            s if s.starts_with("fn(") => self.parse_function_type(s),
+            
+            // Named struct types
+            s if self.module.get_struct_type(s).is_some() => {
+                Ok(self.module.get_struct_type(s).unwrap().into())
+            }
+            
+            // Unknown type
             _ => Err(IoError::type_error(format!("Unsupported type: {}", type_name))),
         }
+    }
+
+    fn parse_function_type(&self, type_str: &str) -> Result<BasicTypeEnum<'ctx>> {
+        // Parse "fn(param1, param2, ...) -> return_type"
+        let (params_str, return_type_str) = type_str
+            .trim_start_matches("fn(")
+            .split_once(") ->")
+            .ok_or_else(|| IoError::type_error("Invalid function type format"))?;
+
+        // Parse parameter types
+        let param_types: Result<Vec<_>> = params_str
+            .split(',')
+            .filter(|s| !s.is_empty())
+            .map(|s| self.get_llvm_type(s.trim()))
+            .collect();
+
+        // Parse return type
+        let return_type = self.get_llvm_type(return_type_str.trim())?;
+
+        // Create function type
+        Ok(return_type
+            .fn_type(&param_types?, false)
+            .ptr_type(Default::default())
+            .into())
     }
 
     fn generate_statement(&mut self, stmt: &ASTNode) -> Result<()> {

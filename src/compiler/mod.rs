@@ -115,16 +115,23 @@ impl<'ctx> Compiler<'ctx> {
     fn run_optimization_passes(&self, module: &Module<'ctx>) -> Result<()> {
         let pass_manager = PassManager::create(module);
 
-        // Add optimization passes based on level
         match self.options.optimization_level {
-            OptimizationLevel::None => {},
+            OptimizationLevel::None => {
+                // Only run essential passes
+                pass_manager.add_basic_alias_analysis_pass();
+                pass_manager.add_type_based_alias_analysis_pass();
+            },
             OptimizationLevel::Less => {
+                // Basic optimizations
                 pass_manager.add_instruction_combining_pass();
                 pass_manager.add_reassociate_pass();
                 pass_manager.add_gvn_pass();
                 pass_manager.add_cfg_simplification_pass();
+                pass_manager.add_basic_alias_analysis_pass();
+                pass_manager.add_promote_memory_to_register_pass();
             },
-            OptimizationLevel::Default | OptimizationLevel::Aggressive => {
+            OptimizationLevel::Default => {
+                // Standard optimization set
                 pass_manager.add_instruction_combining_pass();
                 pass_manager.add_reassociate_pass();
                 pass_manager.add_gvn_pass();
@@ -133,22 +140,61 @@ impl<'ctx> Compiler<'ctx> {
                 pass_manager.add_promote_memory_to_register_pass();
                 pass_manager.add_constant_merge_pass();
                 pass_manager.add_dead_store_elimination_pass();
+                pass_manager.add_sccp_pass();
+                pass_manager.add_loop_simplify_pass();
+                pass_manager.add_lcssa_pass();
+                pass_manager.add_loop_rotate_pass();
+                pass_manager.add_licm_pass();
+                pass_manager.add_ind_var_simplify_pass();
+                pass_manager.add_memcpy_optimize_pass();
+            },
+            OptimizationLevel::Aggressive => {
+                // Aggressive optimizations
+                pass_manager.add_instruction_combining_pass();
+                pass_manager.add_aggressive_inst_combining_pass();
+                pass_manager.add_reassociate_pass();
+                pass_manager.add_gvn_pass();
+                pass_manager.add_new_gvn_pass();
+                pass_manager.add_cfg_simplification_pass();
+                pass_manager.add_basic_alias_analysis_pass();
+                pass_manager.add_promote_memory_to_register_pass();
+                pass_manager.add_constant_merge_pass();
+                pass_manager.add_dead_store_elimination_pass();
                 pass_manager.add_aggressive_dce_pass();
+                pass_manager.add_sccp_pass();
                 
-                if self.options.optimization_level == OptimizationLevel::Aggressive {
-                    pass_manager.add_function_inlining_pass();
-                    pass_manager.add_global_optimizer_pass();
-                    pass_manager.add_ipsccp_pass();
-                    pass_manager.add_dead_arg_elimination_pass();
-                    pass_manager.add_aggressive_inst_combining_pass();
-                    pass_manager.add_tail_call_elimination_pass();
+                // Advanced loop optimizations
+                pass_manager.add_loop_simplify_pass();
+                pass_manager.add_lcssa_pass();
+                pass_manager.add_loop_rotate_pass();
+                pass_manager.add_loop_unroll_pass();
+                pass_manager.add_loop_vectorize_pass();
+                pass_manager.add_licm_pass();
+                pass_manager.add_ind_var_simplify_pass();
+                
+                // Interprocedural optimizations
+                pass_manager.add_function_inlining_pass();
+                pass_manager.add_global_optimizer_pass();
+                pass_manager.add_ipsccp_pass();
+                pass_manager.add_dead_arg_elimination_pass();
+                pass_manager.add_always_inline_pass();
+                pass_manager.add_partial_inlining_pass();
+                
+                // Memory optimizations
+                pass_manager.add_memcpy_optimize_pass();
+                pass_manager.add_memory_to_register_pass();
+                pass_manager.add_jump_threading_pass();
+                pass_manager.add_tail_call_elimination_pass();
+                
+                if self.options.lto_enabled {
+                    pass_manager.add_mergefunc_pass();
+                    pass_manager.add_argument_promotion_pass();
+                    pass_manager.add_constant_propagation_pass();
                 }
             }
         }
 
-        // Run passes
         pass_manager.initialize();
-        
         Ok(())
     }
 
@@ -160,8 +206,56 @@ impl<'ctx> Compiler<'ctx> {
             ASTNode::Function { body, .. } => {
                 1 + body.iter().map(|node| self.count_ast_nodes(node)).sum::<usize>()
             }
-            // Add cases for other node types...
-            _ => 1,
+            ASTNode::BinaryOp { left, right, .. } => {
+                1 + self.count_ast_nodes(left) + self.count_ast_nodes(right)
+            }
+            ASTNode::UnaryOp { expr, .. } => {
+                1 + self.count_ast_nodes(expr)
+            }
+            ASTNode::If { condition, then_branch, else_branch } => {
+                1 + self.count_ast_nodes(condition) 
+                  + then_branch.iter().map(|node| self.count_ast_nodes(node)).sum::<usize>()
+                  + else_branch.as_ref().map_or(0, |nodes| 
+                      nodes.iter().map(|node| self.count_ast_nodes(node)).sum::<usize>())
+            }
+            ASTNode::While { condition, body } => {
+                1 + self.count_ast_nodes(condition)
+                  + body.iter().map(|node| self.count_ast_nodes(node)).sum::<usize>()
+            }
+            ASTNode::For { init, condition, update, body } => {
+                1 + self.count_ast_nodes(init)
+                  + self.count_ast_nodes(condition)
+                  + self.count_ast_nodes(update)
+                  + body.iter().map(|node| self.count_ast_nodes(node)).sum::<usize>()
+            }
+            ASTNode::Call { args, .. } => {
+                1 + args.iter().map(|arg| self.count_ast_nodes(arg)).sum::<usize>()
+            }
+            ASTNode::Return(expr) => {
+                1 + expr.as_ref().map_or(0, |e| self.count_ast_nodes(e))
+            }
+            ASTNode::Block(stmts) => {
+                1 + stmts.iter().map(|stmt| self.count_ast_nodes(stmt)).sum::<usize>()
+            }
+            ASTNode::VariableDeclaration { initializer, .. } => {
+                1 + initializer.as_ref().map_or(0, |init| self.count_ast_nodes(init))
+            }
+            ASTNode::Assignment { value, .. } => {
+                1 + self.count_ast_nodes(value)
+            }
+            ASTNode::Try { body, catch_clauses, finally } => {
+                1 + body.iter().map(|node| self.count_ast_nodes(node)).sum::<usize>()
+                  + catch_clauses.iter().map(|catch| self.count_ast_nodes(&catch.body)).sum::<usize>()
+                  + finally.as_ref().map_or(0, |nodes| 
+                      nodes.iter().map(|node| self.count_ast_nodes(node)).sum::<usize>())
+            }
+            ASTNode::IntegerLiteral(_) |
+            ASTNode::FloatLiteral(_) |
+            ASTNode::StringLiteral(_) |
+            ASTNode::BooleanLiteral(_) |
+            ASTNode::Identifier(_) |
+            ASTNode::Break |
+            ASTNode::Continue => 1,
         }
     }
 

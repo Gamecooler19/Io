@@ -1,5 +1,5 @@
-use crate::{codegen::llvm::LLVMCodeGen, error::IoError, Result};
-use inkwell::{types::BasicType, values::FunctionValue};
+use crate::Result;
+use inkwell::{context::Context, types::BasicType, values::FunctionValue};
 
 pub mod collections;
 pub mod concurrent;
@@ -14,21 +14,27 @@ pub struct NetworkModule<'ctx> {
 }
 
 impl<'ctx> NetworkModule<'ctx> {
-    pub fn new(codegen: &mut LLVMCodeGen<'ctx>) -> Result<Self> {
-        Ok(Self {
-            functions: HashMap::new(),
-            context: codegen.context,
-        })
+    pub fn new(context: &'ctx inkwell::context::Context) -> Self {
+        Self {
+            functions: std::collections::HashMap::new(),
+            context,
+        }
     }
 
-    pub fn generate_bindings(&mut self, codegen: &mut LLVMCodeGen<'ctx>) -> Result<()> {
+    pub fn generate_bindings(
+        &mut self,
+        codegen: &mut crate::codegen::llvm::LLVMCodeGen<'ctx>,
+    ) -> Result<()> {
         self.register_tcp_functions(codegen)?;
         self.register_udp_functions(codegen)?;
         self.register_http_functions(codegen)?;
         Ok(())
     }
 
-    fn register_tcp_functions(&mut self, codegen: &mut LLVMCodeGen<'ctx>) -> Result<()> {
+    fn register_tcp_functions(
+        &mut self,
+        codegen: &mut crate::codegen::llvm::LLVMCodeGen<'ctx>,
+    ) -> Result<()> {
         let i32_type = self.context.i32_type();
         let i8_ptr_type = self.context.i8_type().ptr_type(Default::default());
         let void_type = self.context.void_type();
@@ -51,7 +57,10 @@ impl<'ctx> NetworkModule<'ctx> {
         Ok(())
     }
 
-    fn register_udp_functions(&mut self, codegen: &mut LLVMCodeGen<'ctx>) -> Result<()> {
+    fn register_udp_functions(
+        &mut self,
+        codegen: &mut crate::codegen::llvm::LLVMCodeGen<'ctx>,
+    ) -> Result<()> {
         let i32_type = self.context.i32_type();
         let i8_ptr_type = self.context.i8_type().ptr_type(Default::default());
 
@@ -80,7 +89,10 @@ impl<'ctx> NetworkModule<'ctx> {
         Ok(())
     }
 
-    fn register_http_functions(&mut self, codegen: &mut LLVMCodeGen<'ctx>) -> Result<()> {
+    fn register_http_functions(
+        &mut self,
+        codegen: &mut crate::codegen::llvm::LLVMCodeGen<'ctx>,
+    ) -> Result<()> {
         let i32_type = self.context.i32_type();
         let i8_ptr_type = self.context.i8_type().ptr_type(Default::default());
 
@@ -102,11 +114,6 @@ impl<'ctx> NetworkModule<'ctx> {
     }
 }
 
-use crate::{codegen::llvm::LLVMCodeGen, Result};
-use inkwell::types::BasicTypeEnum;
-use inkwell::values::FunctionValue;
-use std::collections::HashMap;
-
 pub struct StandardLibrary<'ctx> {
     io_module: io::IoModule<'ctx>,
     collections_module: collections::CollectionsModule<'ctx>,
@@ -114,17 +121,25 @@ pub struct StandardLibrary<'ctx> {
     network_module: network::NetworkModule<'ctx>,
 }
 
-use crate::Result;
-use inkwell::{context::Context, types::BasicTypeEnum};
-
 impl<'ctx> StandardLibrary<'ctx> {
-    pub fn new(codegen: &mut LLVMCodeGen<'ctx>) -> Result<Self> {
+    pub fn new(context: &'ctx Context) -> Result<Self> {
         Ok(Self {
-            io_module: io::IoModule::new(codegen)?,
-            collections_module: collections::CollectionsModule::new(codegen)?,
-            concurrent_module: concurrent::ConcurrentModule::new(codegen)?,
-            network_module: network::NetworkModule::new(codegen)?,
+            io_module: io::IoModule::new(),
+            collections_module: collections::CollectionsModule::new(context),
+            concurrent_module: concurrent::ConcurrentModule::new(context),
+            network_module: network::NetworkModule::new(context),
         })
+    }
+
+    pub fn initialize(
+        &mut self,
+        codegen: &mut crate::codegen::llvm::LLVMCodeGen<'ctx>,
+    ) -> Result<()> {
+        self.io_module.initialize(codegen)?;
+        self.collections_module.initialize(codegen)?;
+        self.concurrent_module.initialize(codegen)?;
+        self.network_module.generate_bindings(codegen)?;
+        Ok(())
     }
 
     pub fn register_all(
@@ -148,46 +163,84 @@ impl<'ctx> StandardLibrary<'ctx> {
         }
     }
 
-    pub fn register_builtin_types(&self, codegen: &mut LLVMCodeGen<'ctx>) -> Result<()> {
+    pub fn register_builtin_types(
+        &self,
+        codegen: &mut crate::codegen::llvm::LLVMCodeGen<'ctx>,
+    ) -> Result<()> {
+        // Register sample built-in types
         let i64_type = codegen.context.i64_type().as_basic_type_enum();
-        let f64_type = codegen.context.f64_type().as_basic_type_enum();
+        let f32_type = codegen.context.f32_type().as_basic_type_enum();
+        // e.g., store these in codegen if needed
+        codegen.register_type("int", i64_type)?;
+        codegen.register_type("float", f32_type)?;
+        Ok(())
+    }
+
+    fn register_basic_types(
+        &mut self,
+        codegen: &mut crate::codegen::llvm::LLVMCodeGen<'ctx>,
+    ) -> Result<()> {
+        // Register fundamental types
+        let i8_type = codegen.context.i8_type().as_basic_type_enum();
+        let i16_type = codegen.context.i16_type().as_basic_type_enum();
+        let i32_type = codegen.context.i32_type().as_basic_type_enum();
+        let i64_type = codegen.context.i64_type().as_basic_type_enum();
+        let f32_type = codegen.context.f32_type().as_basic_type_enum();
         let bool_type = codegen.context.bool_type().as_basic_type_enum();
 
-        codegen.register_type("int", i64_type)?;
-        codegen.register_type("float", f64_type)?;
+        // Register all basic types
+        codegen.register_type("i8", i8_type)?;
+        codegen.register_type("i16", i16_type)?;
+        codegen.register_type("i32", i32_type)?;
+        codegen.register_type("i64", i64_type)?;
+        codegen.register_type("f32", f32_type)?;
         codegen.register_type("bool", bool_type)?;
 
         Ok(())
     }
 
-    fn register_basic_types(&mut self, codegen: &mut LLVMCodeGen<'ctx>) -> Result<()> {
-        codegen.register_type("int", codegen.i64_type().as_basic_type_enum())?;
-        codegen.register_type("float", codegen.f64_type().as_basic_type_enum())?;
-        codegen.register_type("bool", codegen.bool_type().as_basic_type_enum())?;
+    pub fn other_std_functions(
+        &mut self,
+        codegen: &mut crate::codegen::llvm::LLVMCodeGen<'ctx>,
+    ) -> Result<()> {
+        let void_type = codegen.context.void_type();
+        let i64_type = codegen.context.i64_type();
+        let i32_type = codegen.context.i32_type();
+        let i8_ptr = codegen.context.i8_type().ptr_type(Default::default());
+
+        // Time functions
+        let time_get_fn =
+            codegen
+                .module
+                .add_function("time_get", i64_type.fn_type(&[], false), None);
+        self.register_function("time_get", time_get_fn);
+
+        // Random number generation
+        let random_int_fn = codegen.module.add_function(
+            "random_int",
+            i32_type.fn_type(&[i32_type.into(), i32_type.into()], false),
+            None,
+        );
+        self.register_function("random_int", random_int_fn);
+
+        // String manipulation functions
+        let strlen_fn =
+            codegen
+                .module
+                .add_function("strlen", i64_type.fn_type(&[i8_ptr.into()], false), None);
+        self.register_function("strlen", strlen_fn);
+
+        let strcat_fn = codegen.module.add_function(
+            "strcat",
+            i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            None,
+        );
+        self.register_function("strcat", strcat_fn);
+
         Ok(())
     }
 
-    //TODO : Add more standard library functions...
-}
-
-use crate::codegen::llvm::LLVMCodeGen;
-use inkwell::context::Context;
-
-impl<'ctx> StdLibModule<'ctx> {
-    pub fn new(context: &'ctx Context) -> Self {
-        Self {
-            collections_module: CollectionsModule::new(context),
-            concurrent_module: ConcurrentModule::new(context),
-            network_module: NetworkModule::new(context),
-            io_module: IoModule::new(context),
-        }
-    }
-
-    pub fn initialize(&mut self, codegen: &mut LLVMCodeGen<'ctx>) -> Result<()> {
-        self.collections_module.initialize(codegen)?;
-        self.concurrent_module.initialize(codegen)?;
-        self.network_module.initialize(codegen)?;
-        self.io_module.initialize(codegen)?;
-        Ok(())
+    fn register_function(&mut self, name: &str, function: FunctionValue<'ctx>) {
+        self.functions.insert(name.to_string(), function);
     }
 }

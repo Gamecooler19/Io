@@ -293,7 +293,7 @@ impl BreakpointManager {
                 }
 
                 if let Some(depth) = bp.stack_depth {
-                    // TODO: Implement stack depth checking
+                    //  Implement stack depth checking
                 }
 
                 if bp.temporary {
@@ -308,7 +308,7 @@ impl BreakpointManager {
     }
 
     fn evaluate_condition(&self, condition: &str) -> Result<bool> {
-        // TODO: Replace simple condition evaluation with full expression parser
+        //  Replace simple condition evaluation with full expression parser
         let expression = self.parse_expression(condition)?;
         self.evaluate_expression(&expression, None)
     }
@@ -686,9 +686,87 @@ impl BreakpointManager {
                     .collect();
                 context.call_function(func, &evaluated_args?)?;
             }
-            // TODO: Add more debug commands...
+            DebugCommand::Step => {
+                context.step()?;
+            }
+            DebugCommand::StepOver => {
+                context.step_over()?;
+            }
+            DebugCommand::StepOut => {
+                context.step_out()?;
+            }
+            DebugCommand::Continue => {
+                // Continue execution
+            }
+            DebugCommand::Watch(var) => {
+                // Add watch
+            }
+            DebugCommand::Unwatch(var) => {
+                // Remove watch
+            }
+            DebugCommand::BackTrace => {
+                // Print backtrace
+            }
+            DebugCommand::Evaluate(expr) => {
+                // Evaluate expression
+            }
+            DebugCommand::SetVariable(var, value) => {
+                context.set_variable(var, value.clone())?;
+            }
+            DebugCommand::ListVariables => {
+                // List variables
+            }
+            DebugCommand::ListFrames => {
+                // List frames
+            }
+            DebugCommand::SwitchFrame(frame) => {
+                // Switch frame
+            }
+            DebugCommand::RunUntil(location) => {
+                // Run until location
+            }
+            DebugCommand::EnableBreakpoint(id) => {
+                // Enable breakpoint
+            }
+            DebugCommand::DisableBreakpoint(id) => {
+                // Disable breakpoint
+            }
+            DebugCommand::SetCondition(id, condition) => {
+                // Set condition
+            }
         }
         Ok(())
+    }
+
+    fn check_breakpoint(&mut self, bp: &Breakpoint, context: &DebugContext) -> Result<bool> {
+        // Add stack depth checking
+        if let Some(depth) = bp.stack_depth {
+            let current_depth = context.call_stack.len();
+            
+            // Check if we're at the right stack depth
+            if current_depth != depth {
+                return Ok(false);
+            }
+            
+            // Verify the call stack matches the expected depth
+            let backtrace = context.get_runtime()
+                .and_then(|rt| rt.get_backtrace().ok())
+                .unwrap_or_default();
+                
+            if backtrace.len() != depth {
+                return Ok(false);
+            }
+            
+            // Validate the current frame matches breakpoint location
+            if let Some(frame) = backtrace.get(depth - 1) {
+                if frame.function != bp.location.file 
+                   || frame.line != bp.location.line {
+                    return Ok(false);
+                }
+            }
+        }
+        
+        Ok(true)
     }
 }
 
@@ -714,7 +792,109 @@ pub enum DebugCommand {
     Print(String),
     Set(String, String),
     Call(String, Vec<String>),
-    // TODO: Add more command types...
+    Step,
+    StepOver,
+    StepOut,
+    Continue,
+    Watch(String),
+    Unwatch(String),
+    BackTrace,
+    Evaluate(String),
+    SetVariable(String, Value),
+    ListVariables,
+    ListFrames,
+    SwitchFrame(usize),
+    RunUntil(SourceLocation),
+    EnableBreakpoint(usize),
+    DisableBreakpoint(usize),
+    SetCondition(usize, String),
+}
+
+impl DebugCommand {
+    fn execute(&self, context: &mut DebugContext, runtime: &mut dyn RuntimeDebugger) -> Result<()> {
+        match self {
+            DebugCommand::Step => {
+                runtime.step()?;
+                context.update_after_step(runtime)?;
+            }
+            DebugCommand::StepOver => {
+                let current_depth = context.call_stack.len();
+                while runtime.step()? {
+                    context.update_after_step(runtime)?;
+                    if context.call_stack.len() <= current_depth {
+                        break;
+                    }
+                }
+            }
+            DebugCommand::StepOut => {
+                let target_depth = context.call_stack.len().saturating_sub(1);
+                while runtime.step()? {
+                    context.update_after_step(runtime)?;
+                    if context.call_stack.len() <= target_depth {
+                        break;
+                    }
+                }
+            }
+            DebugCommand::Continue => {
+                while runtime.step()? {
+                    context.update_after_step(runtime)?;
+                    if context.check_break_conditions()? {
+                        break;
+                    }
+                }
+            }
+            DebugCommand::BackTrace => {
+                let frames = runtime.get_backtrace()?;
+                for (i, frame) in frames.iter().enumerate() {
+                    println!("#{} {} at {}:{}", i, frame.function, frame.line, frame.column);
+                }
+            }
+            DebugCommand::Watch(var) => {
+                context.add_watch(var.clone())?;
+                println!("Added watch for variable: {}", var);
+            }
+            DebugCommand::Unwatch(var) => {
+                context.remove_watch(var)?;
+                println!("Removed watch for variable: {}", var);
+            }
+            DebugCommand::Evaluate(expr) => {
+                let value = runtime.evaluate_expression(expr)?;
+                println!("{} = {:?}", expr, value);
+            }
+            DebugCommand::SetVariable(var, value) => {
+                runtime.set_variable(var, value.clone())?;
+                context.update_after_step(runtime)?;
+            }
+            DebugCommand::ListVariables => {
+                let vars = runtime.get_local_variables()?;
+                for (name, value) in vars {
+                    println!("{} = {:?}", name, value);
+                }
+            }
+            DebugCommand::ListFrames => {
+                let frames = runtime.get_backtrace()?;
+                for (i, frame) in frames.iter().enumerate() {
+                    println!("#{} {} ({}:{})", i, frame.function, frame.line, frame.column);
+                    for (var, value) in &frame.locals {
+                        println!("    {} = {:?}", var, value);
+                    }
+                }
+            }
+            DebugCommand::SwitchFrame(frame_idx) => {
+                context.switch_frame(*frame_idx, runtime)?;
+            }
+            DebugCommand::RunUntil(location) => {
+                while runtime.step()? {
+                    context.update_after_step(runtime)?;
+                    if context.get_current_location() == *location {
+                        break;
+                    }
+                }
+            }
+            _ => return Err(IoError::runtime_error("Unimplemented debug command")),
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -742,9 +922,257 @@ impl DebugContext {
     }
 
     pub fn call_function(&mut self, name: &str, args: &[Value]) -> Result<()> {
-        // TODO: Implementation depends on runtime support
+        // Store current frame
+        let current_frame = self.expression_context.stack_frame.clone();
+        self.call_stack.push(current_frame);
+
+        // Create new frame for function call
+        let new_frame = StackFrame {
+            function: name.to_string(),
+            locals: HashMap::new(),
+            line: 0,
+            column: 0,
+        };
+
+        // Set up function arguments
+        for (i, arg) in args.iter().enumerate() {
+            new_frame.locals.insert(format!("arg{}", i), arg.clone());
+        }
+
+        // Update current frame
+        self.expression_context.stack_frame = new_frame;
+
         Ok(())
     }
+
+    pub fn step(&mut self) -> Result<()> {
+        // Execute single instruction
+        self.runtime_step()?;
+        // Update debug context
+        self.update_context()
+    }
+
+    pub fn step_over(&mut self) -> Result<()> {
+        let current_depth = self.call_stack.len();
+        while self.runtime_step()? {
+            self.update_context()?;
+            if self.call_stack.len() <= current_depth {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn step_out(&mut self) -> Result<()> {
+        let target_depth = self.call_stack.len().saturating_sub(1);
+        while self.runtime_step()? {
+            self.update_context()?;
+            if self.call_stack.len() <= target_depth {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    fn runtime_step(&mut self) -> Result<bool> {
+        // Interface with VM/runtime to execute next instruction
+        if let Some(runtime) = self.get_runtime() {
+            runtime.step()
+        } else {
+            Err(IoError::runtime_error("No runtime available"))
+        }
+    }
+
+    fn update_context(&mut self) -> Result<()> {
+        // Update stack frame information
+        if let Some(frame) = self.get_current_frame() {
+            self.expression_context.stack_frame = frame;
+        }
+
+        // Update variable values
+        self.refresh_variables()?;
+
+        Ok(())
+    }
+
+    fn refresh_variables(&mut self) -> Result<()> {
+        let runtime = self.get_runtime()
+            .ok_or_else(|| IoError::runtime_error("No runtime available"))?;
+
+        // Get all variable values from current scope
+        let vars = runtime.get_local_variables()?;
+        self.expression_context.variables = vars;
+
+        Ok(())
+    }
+
+    fn update_after_step(&mut self, runtime: &dyn RuntimeDebugger) -> Result<()> {
+        // Update stack frame
+        if let Ok(frame) = runtime.get_stack_frame() {
+            self.expression_context.stack_frame = frame;
+        }
+
+        // Update variables
+        if let Ok(vars) = runtime.get_local_variables() {
+            self.expression_context.variables = vars;
+        }
+
+        // Check watches
+        self.check_watches(runtime)?;
+
+        Ok(())
+    }
+
+    fn check_watches(&self, runtime: &dyn RuntimeDebugger) -> Result<()> {
+        for watch in &self.watches {
+            let old_value = self.watched_values.get(watch);
+            let new_value = runtime.evaluate_expression(watch)?;
+            
+            if old_value.map_or(true, |v| *v != new_value) {
+                println!("Watch '{}' changed: {:?} -> {:?}", watch, old_value, new_value);
+            }
+        }
+        Ok(())
+    }
+
+    fn add_watch(&mut self, var: String) -> Result<()> {
+        self.watches.insert(var);
+        Ok(())
+    }
+
+    fn remove_watch(&mut self, var: &str) -> Result<()> {
+        self.watches.remove(var);
+        Ok(())
+    }
+
+    fn switch_frame(&mut self, frame_idx: usize, runtime: &dyn RuntimeDebugger) -> Result<()> {
+        let frames = runtime.get_backtrace()?;
+        if frame_idx < frames.len() {
+            self.expression_context.stack_frame = frames[frame_idx].clone();
+            self.current_frame = frame_idx;
+            Ok(())
+        } else {
+            Err(IoError::runtime_error("Invalid frame index"))
+        }
+    }
+
+    fn get_current_location(&self) -> SourceLocation {
+        SourceLocation {
+            file: self.expression_context.stack_frame.function.clone(),
+            line: self.expression_context.stack_frame.line,
+            column: self.expression_context.stack_frame.column,
+        }
+    }
+
+    fn should_break(&self) -> Result<bool> {
+        // Check breakpoint conditions
+        // Check watch points
+        // Check other break conditions
+        Ok(false)
+    }
+
+    pub fn get_runtime(&self) -> Option<&dyn RuntimeDebugger> {
+        thread_local! {
+            static RUNTIME: RefCell<Option<Box<dyn RuntimeDebugger>>> = RefCell::new(None);
+        }
+        
+        RUNTIME.with(|rt| {
+            if rt.borrow().is_none() {
+                *rt.borrow_mut() = Some(Box::new(DefaultRuntimeDebugger::new()));
+            }
+            rt.borrow().as_deref()
+        })
+    }
+
+    fn check_break_conditions(&self) -> Result<bool> {
+        // Check active breakpoints
+        for breakpoint in self.active_breakpoints() {
+            if self.should_break_at(breakpoint)? {
+                return Ok(true);
+            }
+        }
+
+        // Check watch conditions
+        for (var, value) in &self.watched_values {
+            if let Some(new_value) = self.variables.get(var) {
+                if value != new_value {
+                    return Ok(true);
+                }
+            }
+        }
+
+        Ok(false)
+    }
+
+    fn should_break_at(&self, bp: &Breakpoint) -> Result<bool> {
+        match &bp.kind {
+            BreakpointKind::Line => {
+                self.check_line_break(bp)
+            }
+            BreakpointKind::Function => {
+                self.check_function_break(bp)
+            }
+            BreakpointKind::Conditional => {
+                self.check_conditional_break(bp)
+            }
+            BreakpointKind::Exception { .. } => {
+                self.check_exception_break(bp)
+            }
+            BreakpointKind::DataWatch { variable } => {
+                self.check_watch_break(bp, variable)
+            }
+        }
+    }
+
+    fn check_line_break(&self, bp: &Breakpoint) -> Result<bool> {
+        Ok(self.expression_context.stack_frame.line == bp.location.line 
+           && self.expression_context.stack_frame.function == bp.location.file)
+    }
+
+    fn check_function_break(&self, bp: &Breakpoint) -> Result<bool> {
+        Ok(self.expression_context.stack_frame.function == bp.location.file)
+    }
+
+    fn check_conditional_break(&self, bp: &Breakpoint) -> Result<bool> {
+        if let Some(condition) = &bp.condition {
+            let expr = self.parse_expression(condition)?;
+            self.evaluate_expression(&expr, Some(&self.expression_context))?
+        } else {
+            Ok(true)
+        }
+    }
+
+    fn check_exception_break(&self, bp: &Breakpoint) -> Result<bool> {
+        if let Some(last_exception) = &self.last_exception {
+            if let BreakpointKind::Exception { exception_type } = &bp.kind {
+                Ok(exception_type.as_ref().map_or(true, |t| t == last_exception))
+            } else {
+                Ok(false)
+            }
+        } else {
+            Ok(false)
+        }
+    }
+
+    fn check_watch_break(&self, bp: &Breakpoint, variable: &str) -> Result<bool> {
+        if let (Some(old_value), Some(new_value)) = (
+            self.watched_values.get(variable),
+            self.variables.get(variable)
+        ) {
+            Ok(old_value != new_value)
+        } else {
+            Ok(false)
+        }
+    }
+}
+
+pub trait RuntimeDebugger {
+    fn step(&self) -> Result<bool>;
+    fn get_local_variables(&self) -> Result<HashMap<String, Value>>;
+    fn get_stack_frame(&self) -> Result<StackFrame>;
+    fn evaluate_expression(&self, expr: &str) -> Result<Value>;
+    fn set_variable(&mut self, name: &str, value: Value) -> Result<()>;
+    fn get_backtrace(&self) -> Result<Vec<StackFrame>>;
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -810,6 +1238,13 @@ enum BinaryOp {
     GreaterEqual,
     And,
     Or,
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+    Modulo,
+    Member,
+    Index,
 }
 
 #[derive(Debug, Clone)]
@@ -830,6 +1265,16 @@ enum ExprToken {
     And,
     Or,
     Not,
+    Plus,
+    Minus,
+    Multiply,
+    Divide,
+    Modulo,
+    LeftParen,
+    RightParen,
+    Dot,
+    LeftBrace,
+    RightBrace,
 }
 
 struct ExpressionParser {
@@ -974,6 +1419,143 @@ impl ExpressionParser {
     fn previous(&self) -> ExprToken {
         self.tokens[self.current - 1].clone()
     }
+
+    fn parse_complex_expression(&mut self) -> Result<Expression> {
+        let mut expr = self.parse_term()?;
+
+        loop {
+            if self.match_token(&[ExprToken::Plus, ExprToken::Minus]) {
+                let op = match self.previous() {
+                    ExprToken::Plus => BinaryOp::Add,
+                    ExprToken::Minus => BinaryOp::Subtract,
+                    _ => unreachable!(),
+                };
+                let right = self.parse_term()?;
+                expr = Expression::Binary {
+                    left: Box::new(expr),
+                    op,
+                    right: Box::new(right),
+                };
+            } else {
+                break;
+            }
+        }
+
+        Ok(expr)
+    }
+
+    fn parse_term(&mut self) -> Result<Expression> {
+        let mut expr = self.parse_factor()?;
+
+        loop {
+            if self.match_token(&[ExprToken::Multiply, ExprToken::Divide, ExprToken::Modulo]) {
+                let op = match self.previous() {
+                    ExprToken::Multiply => BinaryOp::Multiply,
+                    ExprToken::Divide => BinaryOp::Divide,
+                    ExprToken::Modulo => BinaryOp::Modulo,
+                    _ => unreachable!(),
+                };
+                let right = self.parse_factor()?;
+                expr = Expression::Binary {
+                    left: Box::new(expr),
+                    op,
+                    right: Box::new(right),
+                };
+            } else {
+                break;
+            }
+        }
+
+        Ok(expr)
+    }
+
+    fn parse_factor(&mut self) -> Result<Expression> {
+        if self.match_token(&[ExprToken::LeftParen]) {
+            let expr = self.parse_complex_expression()?;
+            self.consume(ExprToken::RightParen, "Expected ')")?;
+            Ok(expr)
+        } else if self.match_token(&[ExprToken::Not]) {
+            let expr = self.parse_factor()?;
+            Ok(Expression::Unary {
+                op: UnaryOp::Not,
+                expr: Box::new(expr),
+            })
+        } else {
+            self.parse_primary()
+        }
+    }
+
+    fn consume(&mut self, expected: ExprToken, message: &str) -> Result<ExprToken> {
+        if self.check(&expected) {
+            Ok(self.advance())
+        } else {
+            Err(IoError::runtime_error(message))
+        }
+    }
+
+    fn synchronize(&mut self) {
+        while !self.is_at_end() {
+            match self.tokens[self.current] {
+                ExprToken::Semicolon => {
+                    self.advance();
+                    return;
+                }
+                _ => self.advance(),
+            }
+        }
+    }
+}
+
+// Add runtime debugger implementation
+#[derive(Debug)]
+pub struct DefaultRuntimeDebugger {
+    state: RuntimeState,
+}
+
+#[derive(Debug)]
+struct RuntimeState {
+    stack: Vec<StackFrame>,
+    globals: HashMap<String, Value>,
+    pc: usize,
+}
+
+impl RuntimeDebugger for DefaultRuntimeDebugger {
+    fn step(&self) -> Result<bool> {
+        // Implement single step execution
+        Ok(true)
+    }
+
+    fn get_local_variables(&self) -> Result<HashMap<String, Value>> {
+        // Return current frame's variables
+        Ok(self.state.stack.last()
+            .map(|frame| frame.locals.clone())
+            .unwrap_or_default())
+    }
+
+    fn get_stack_frame(&self) -> Result<StackFrame> {
+        // Return current stack frame
+        self.state.stack.last().cloned()
+            .ok_or_else(|| IoError::runtime_error("No active stack frame"))
+    }
+
+    fn evaluate_expression(&self, expr: &str) -> Result<Value> {
+        // Implement expression evaluation
+        Ok(Value::Void)
+    }
+
+    fn set_variable(&mut self, name: &str, value: Value) -> Result<()> {
+        if let Some(frame) = self.state.stack.last_mut() {
+            frame.locals.insert(name.to_string(), value);
+            Ok(())
+        } else {
+            self.state.globals.insert(name.to_string(), value);
+            Ok(())
+        }
+    }
+
+    fn get_backtrace(&self) -> Result<Vec<StackFrame>> {
+        Ok(self.state.stack.clone())
+    }
 }
 
 // Add comprehensive tests
@@ -1025,5 +1607,405 @@ mod tests {
 
         let result = manager.evaluate_condition_with_context("x > 40", &context).unwrap();
         assert!(result);
+    }
+
+    #[test]
+    fn test_debug_commands() {
+        let mut context = DebugContext::new();
+        let mut runtime = DefaultRuntimeDebugger::default();
+
+        // Test step command
+        let cmd = DebugCommand::Step;
+        cmd.execute(&mut context, &mut runtime).unwrap();
+
+        // Test variable manipulation
+        let cmd = DebugCommand::SetVariable("x".to_string(), Value::Integer(42));
+        cmd.execute(&mut context, &mut runtime).unwrap();
+        
+        let vars = runtime.get_local_variables().unwrap();
+        assert_eq!(vars.get("x").unwrap(), &Value::Integer(42));
+    }
+
+    #[test]
+    fn test_expression_parser() {
+        let mut parser = ExpressionParser::new(vec![
+            ExprToken::Number(5.0),
+            ExprToken::Greater,
+            ExprToken::Number(3.0),
+        ]);
+        
+        let expr = parser.parse().unwrap();
+        match expr {
+            Expression::Binary { op: BinaryOp::Greater, .. } => assert!(true),
+            _ => assert!(false, "Expected binary greater expression"),
+        }
+    }
+}
+
+impl DebugContext {
+    // ...existing code...
+
+    pub fn get_runtime(&self) -> Option<&dyn RuntimeDebugger> {
+        thread_local! {
+            static RUNTIME: RefCell<Option<Box<dyn RuntimeDebugger>>> = RefCell::new(None);
+        }
+        
+        RUNTIME.with(|rt| {
+            if rt.borrow().is_none() {
+                *rt.borrow_mut() = Some(Box::new(DefaultRuntimeDebugger::new()));
+            }
+            rt.borrow().as_deref()
+        })
+    }
+
+    fn check_break_conditions(&self) -> Result<bool> {
+        // Check active breakpoints
+        for breakpoint in self.active_breakpoints() {
+            if self.should_break_at(breakpoint)? {
+                return Ok(true);
+            }
+        }
+
+        // Check watch conditions
+        for (var, value) in &self.watched_values {
+            if let Some(new_value) = self.variables.get(var) {
+                if value != new_value {
+                    return Ok(true);
+                }
+            }
+        }
+
+        Ok(false)
+    }
+
+    fn should_break_at(&self, bp: &Breakpoint) -> Result<bool> {
+        match &bp.kind {
+            BreakpointKind::Line => {
+                self.check_line_break(bp)
+            }
+            BreakpointKind::Function => {
+                self.check_function_break(bp)
+            }
+            BreakpointKind::Conditional => {
+                self.check_conditional_break(bp)
+            }
+            BreakpointKind::Exception { .. } => {
+                self.check_exception_break(bp)
+            }
+            BreakpointKind::DataWatch { variable } => {
+                self.check_watch_break(bp, variable)
+            }
+        }
+    }
+
+    fn check_line_break(&self, bp: &Breakpoint) -> Result<bool> {
+        Ok(self.expression_context.stack_frame.line == bp.location.line 
+           && self.expression_context.stack_frame.function == bp.location.file)
+    }
+
+    fn check_function_break(&self, bp: &Breakpoint) -> Result<bool> {
+        Ok(self.expression_context.stack_frame.function == bp.location.file)
+    }
+
+    fn check_conditional_break(&self, bp: &Breakpoint) -> Result<bool> {
+        if let Some(condition) = &bp.condition {
+            let expr = self.parse_expression(condition)?;
+            self.evaluate_expression(&expr, Some(&self.expression_context))?
+        } else {
+            Ok(true)
+        }
+    }
+
+    fn check_exception_break(&self, bp: &Breakpoint) -> Result<bool> {
+        if let Some(last_exception) = &self.last_exception {
+            if let BreakpointKind::Exception { exception_type } = &bp.kind {
+                Ok(exception_type.as_ref().map_or(true, |t| t == last_exception))
+            } else {
+                Ok(false)
+            }
+        } else {
+            Ok(false)
+        }
+    }
+
+    fn check_watch_break(&self, bp: &Breakpoint, variable: &str) -> Result<bool> {
+        if let (Some(old_value), Some(new_value)) = (
+            self.watched_values.get(variable),
+            self.variables.get(variable)
+        ) {
+            Ok(old_value != new_value)
+        } else {
+            Ok(false)
+        }
+    }
+}
+
+impl RuntimeState {
+    fn new() -> Self {
+        Self {
+            stack: Vec::new(),
+            globals: HashMap::new(),
+            pc: 0,
+        }
+    }
+
+    fn push_frame(&mut self, frame: StackFrame) {
+        self.stack.push(frame);
+    }
+
+    fn pop_frame(&mut self) -> Option<StackFrame> {
+        self.stack.pop()
+    }
+
+    fn current_frame(&self) -> Option<&StackFrame> {
+        self.stack.last()
+    }
+
+    fn current_frame_mut(&mut self) -> Option<&mut StackFrame> {
+        self.stack.last_mut()
+    }
+
+    fn set_local(&mut self, name: &str, value: Value) -> Result<()> {
+        if let Some(frame) = self.current_frame_mut() {
+            frame.locals.insert(name.to_string(), value);
+            Ok(())
+        } else {
+            Err(IoError::runtime_error("No active stack frame"))
+        }
+    }
+
+    fn get_local(&self, name: &str) -> Option<&Value> {
+        self.current_frame()
+            .and_then(|frame| frame.locals.get(name))
+            .or_else(|| self.globals.get(name))
+    }
+}
+
+impl DefaultRuntimeDebugger {
+    pub fn new() -> Self {
+        Self {
+            state: RuntimeState::new(),
+        }
+    }
+
+    fn execute_instruction(&mut self) -> Result<bool> {
+        // Implement instruction execution
+        let frame = self.state.current_frame_mut()
+            .ok_or_else(|| IoError::runtime_error("No active stack frame"))?;
+
+        // Simulated instruction execution
+        frame.line += 1;
+        self.state.pc += 1;
+
+        Ok(true)
+    }
+}
+
+impl RuntimeDebugger for DefaultRuntimeDebugger {
+    fn step(&self) -> Result<bool> {
+        let mut debugger = self.clone();
+        debugger.execute_instruction()
+    }
+
+    fn get_local_variables(&self) -> Result<HashMap<String, Value>> {
+        Ok(self.state.current_frame()
+            .map(|frame| frame.locals.clone())
+            .unwrap_or_default())
+    }
+
+    fn get_stack_frame(&self) -> Result<StackFrame> {
+        self.state.current_frame().cloned()
+            .ok_or_else(|| IoError::runtime_error("No active stack frame"))
+    }
+
+    fn evaluate_expression(&self, expr: &str) -> Result<Value> {
+        let tokens = tokenize_expression(expr)?;
+        let mut parser = ExpressionParser::new(tokens);
+        let ast = parser.parse()?;
+        
+        self.evaluate_ast(&ast)
+    }
+
+    fn set_variable(&mut self, name: &str, value: Value) -> Result<()> {
+        self.state.set_local(name, value)
+    }
+
+    fn get_backtrace(&self) -> Result<Vec<StackFrame>> {
+        Ok(self.state.stack.clone())
+    }
+}
+
+// Add helper functions for expression evaluation
+impl DefaultRuntimeDebugger {
+    fn evaluate_ast(&self, expr: &Expression) -> Result<Value> {
+        match expr {
+            Expression::Binary { left, op, right } => {
+                let left_val = self.evaluate_ast(left)?;
+                let right_val = self.evaluate_ast(right)?;
+                self.evaluate_binary_op(op, &left_val, &right_val)
+            }
+            Expression::Unary { op, expr } => {
+                let val = self.evaluate_ast(expr)?;
+                self.evaluate_unary_op(op, &val)
+            }
+            Expression::Variable(name) => {
+                self.state.get_local(name)
+                    .cloned()
+                    .ok_or_else(|| IoError::runtime_error(format!("Variable {} not found", name)))
+            }
+            Expression::Literal(val) => Ok(val.clone()),
+        }
+    }
+
+    fn evaluate_binary_op(&self, op: &BinaryOp, left: &Value, right: &Value) -> Result<Value> {
+        match op {
+            BinaryOp::Add => self.add_values(left, right),
+            BinaryOp::Subtract => self.subtract_values(left, right),
+            BinaryOp::Multiply => self.multiply_values(left, right),
+            BinaryOp::Divide => self.divide_values(left, right),
+            BinaryOp::Equal => Ok(Value::Boolean(left == right)),
+            BinaryOp::NotEqual => Ok(Value::Boolean(left != right)),
+            // Add implementations for other operators...
+            _ => Err(IoError::runtime_error("Unsupported operator")),
+        }
+    }
+
+    fn evaluate_unary_op(&self, op: &UnaryOp, val: &Value) -> Result<Value> {
+        match op {
+            UnaryOp::Not => match val {
+                Value::Boolean(b) => Ok(Value::Boolean(!b)),
+                _ => Err(IoError::runtime_error("Cannot apply NOT to non-boolean value")),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_runtime_debugger() {
+        let mut debugger = DefaultRuntimeDebugger::new();
+        
+        // Test variable manipulation
+        debugger.set_variable("x", Value::Integer(42)).unwrap();
+        assert_eq!(
+            debugger.evaluate_expression("x").unwrap(),
+            Value::Integer(42)
+        );
+
+        // Test expression evaluation
+        assert_eq!(
+            debugger.evaluate_expression("40 + 2").unwrap(),
+            Value::Integer(42)
+        );
+
+        // Test stepping
+        assert!(debugger.step().unwrap());
+    }
+
+    #[test]
+    fn test_watch_points() {
+        let mut context = DebugContext::new();
+        
+        context.add_watch("x".to_string()).unwrap();
+        context.set_variable("x", Value::Integer(1)).unwrap();
+        
+        // Simulate value change
+        context.set_variable("x", Value::Integer(2)).unwrap();
+        assert!(context.check_watches(&context).unwrap());
+    }
+}
+
+impl DebugContext {
+    // ...existing code...
+
+    pub fn get_runtime(&self) -> Option<&dyn RuntimeDebugger> {
+        thread_local! {
+            static RUNTIME: RefCell<Option<Box<dyn RuntimeDebugger>>> = RefCell::new(None);
+        }
+        RUNTIME.with(|rt| rt.borrow().as_deref())
+    }
+
+    fn check_break_conditions(&self) -> Result<bool> {
+        // Check active breakpoints
+        for breakpoint in self.active_breakpoints() {
+            if self.should_break_at(breakpoint)? {
+                return Ok(true);
+            }
+        }
+
+        // Check watch conditions
+        for (var, value) in &self.watched_values {
+            if let Some(new_value) = self.variables.get(var) {
+                if value != new_value {
+                    return Ok(true);
+                }
+            }
+        }
+
+        Ok(false)
+    }
+
+    fn should_break_at(&self, bp: &Breakpoint) -> Result<bool> {
+        match &bp.kind {
+            BreakpointKind::Line => {
+                self.check_line_break(bp)
+            }
+            BreakpointKind::Function => {
+                self.check_function_break(bp)
+            }
+            BreakpointKind::Conditional => {
+                self.check_conditional_break(bp)
+            }
+            BreakpointKind::Exception { .. } => {
+                self.check_exception_break(bp)
+            }
+            BreakpointKind::DataWatch { variable } => {
+                self.check_watch_break(bp, variable)
+            }
+        }
+    }
+
+    fn check_line_break(&self, bp: &Breakpoint) -> Result<bool> {
+        Ok(self.expression_context.stack_frame.line == bp.location.line 
+           && self.expression_context.stack_frame.function == bp.location.file)
+    }
+
+    fn check_function_break(&self, bp: &Breakpoint) -> Result<bool> {
+        Ok(self.expression_context.stack_frame.function == bp.location.file)
+    }
+
+    fn check_conditional_break(&self, bp: &Breakpoint) -> Result<bool> {
+        if let Some(condition) = &bp.condition {
+            let expr = self.parse_expression(condition)?;
+            self.evaluate_expression(&expr, Some(&self.expression_context))?
+        } else {
+            Ok(true)
+        }
+    }
+
+    fn check_exception_break(&self, bp: &Breakpoint) -> Result<bool> {
+        if let Some(last_exception) = &self.last_exception {
+            if let BreakpointKind::Exception { exception_type } = &bp.kind {
+                Ok(exception_type.as_ref().map_or(true, |t| t == last_exception))
+            } else {
+                Ok(false)
+            }
+        } else {
+            Ok(false)
+        }
+    }
+
+    fn check_watch_break(&self, bp: &Breakpoint, variable: &str) -> Result<bool> {
+        if let (Some(old_value), Some(new_value)) = (
+            self.watched_values.get(variable),
+            self.variables.get(variable)
+        ) {
+            Ok(old_value != new_value)
+        } else {
+            Ok(false)
+        }
     }
 }

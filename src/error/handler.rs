@@ -41,7 +41,6 @@ impl ErrorHandler {
 
         let contexts = self.contexts.read();
         if let Some(context) = contexts.last() {
-            // Enhance error with context
             match &error {
                 IoError::LexerError { position, message } => {
                     IoError::LexerError {
@@ -57,8 +56,81 @@ impl ErrorHandler {
                         ),
                     }
                 }
-                // TODO: Handle other error variants...
-                _ => error,
+                IoError::ParserError { span, message } => {
+                    IoError::ParserError {
+                        span: *span,
+                        message: format!(
+                            "{}\nIn file {} at line {}:{}\n{}\n{}^",
+                            message,
+                            context.file,
+                            context.line,
+                            context.column,
+                            context.source_line,
+                            " ".repeat(context.column)
+                        ),
+                    }
+                }
+                IoError::TypeError { expected, found, span } => {
+                    IoError::TypeError {
+                        expected: expected.clone(),
+                        found: found.clone(),
+                        span: *span,
+                        message: format!(
+                            "Type mismatch at {}:{}:{}\nExpected: {}\nFound: {}\n{}\n{}^",
+                            context.file,
+                            context.line,
+                            context.column,
+                            expected,
+                            found,
+                            context.source_line,
+                            " ".repeat(context.column)
+                        ),
+                    }
+                }
+                IoError::RuntimeError { message, stack_trace } => {
+                    IoError::RuntimeError {
+                        message: format!(
+                            "{}\nAt {}:{}:{}\n{}\n{}^",
+                            message,
+                            context.file,
+                            context.line,
+                            context.column,
+                            context.source_line,
+                            " ".repeat(context.column)
+                        ),
+                        stack_trace: stack_trace.clone(),
+                    }
+                }
+                IoError::UnresolvedSymbol { name, scope } => {
+                    IoError::UnresolvedSymbol {
+                        name: name.clone(),
+                        scope: scope.clone(),
+                        message: format!(
+                            "Unresolved symbol '{}' in scope '{}'\nAt {}:{}:{}\n{}\n{}^",
+                            name,
+                            scope,
+                            context.file,
+                            context.line,
+                            context.column,
+                            context.source_line,
+                            " ".repeat(context.column)
+                        ),
+                    }
+                }
+                IoError::ValidationError { code, details } => {
+                    IoError::ValidationError {
+                        code: *code,
+                        details: format!(
+                            "{}\nAt {}:{}:{}\n{}\n{}^",
+                            details,
+                            context.file,
+                            context.line,
+                            context.column,
+                            context.source_line,
+                            " ".repeat(context.column)
+                        ),
+                    }
+                }
             }
         } else {
             error
@@ -93,8 +165,73 @@ impl ErrorHandler {
                         ),
                     }
                 }
-                // TODO: Add handling for other error types
-                _ => error,
+                IoError::ParserError { span, message } => {
+                    let location = self.get_error_location(context, span.start);
+                    IoError::ParserError {
+                        span: *span,
+                        message: format!(
+                            "{}\n{}\nAt {}:{}:{}\n{}\n{}^",
+                            message,
+                            enhanced_message,
+                            context.file,
+                            location.line,
+                            location.column,
+                            self.get_context_lines(context, location.line),
+                            " ".repeat(location.column)
+                        ),
+                    }
+                }
+                IoError::TypeError { expected, found, span } => {
+                    let location = self.get_error_location(context, span.start);
+                    IoError::TypeError {
+                        expected: expected.clone(),
+                        found: found.clone(),
+                        span: *span,
+                        message: format!(
+                            "Type mismatch\n{}\nAt {}:{}:{}\n{}\n{}^",
+                            enhanced_message,
+                            context.file,
+                            location.line,
+                            location.column,
+                            self.get_context_lines(context, location.line),
+                            " ".repeat(location.column)
+                        ),
+                    }
+                }
+                IoError::RuntimeError { message, stack_trace } => {
+                    IoError::RuntimeError {
+                        message: format!(
+                            "{}\n{}\nStack trace:\n{}",
+                            message,
+                            enhanced_message,
+                            stack_trace.join("\n")
+                        ),
+                        stack_trace: stack_trace.clone(),
+                    }
+                }
+                IoError::UnresolvedSymbol { name, scope } => {
+                    IoError::UnresolvedSymbol {
+                        name: name.clone(),
+                        scope: scope.clone(),
+                        message: format!(
+                            "Symbol '{}' not found in scope '{}'\n{}",
+                            name,
+                            scope,
+                            enhanced_message
+                        ),
+                    }
+                }
+                IoError::ValidationError { code, details } => {
+                    IoError::ValidationError {
+                        code: *code,
+                        details: format!(
+                            "Validation error {}: {}\n{}",
+                            code,
+                            details,
+                            enhanced_message
+                        ),
+                    }
+                }
             }
         } else {
             error

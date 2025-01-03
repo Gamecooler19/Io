@@ -380,9 +380,39 @@ impl IoLanguageServer {
     }
 
     fn format_code(&self, code: &str) -> IoResult<String> {
-        // TODO: Implement code formatting logic
-        // For now, just return the original code
-        Ok(code.to_string())
+        let mut formatted = String::new();
+        let mut indent_level = 0;
+        let indent_str = "    ";  // 4 spaces
+        
+        for line in code.lines() {
+            let trimmed = line.trim();
+            
+            // Decrease indent for closing braces
+            if trimmed.starts_with('}') {
+                indent_level = indent_level.saturating_sub(1);
+            }
+            
+            // Add indentation
+            if !trimmed.is_empty() {
+                formatted.push_str(&indent_str.repeat(indent_level));
+                formatted.push_str(trimmed);
+                formatted.push('\n');
+            }
+            
+            // Increase indent after opening braces
+            if trimmed.ends_with('{') {
+                indent_level += 1;
+            }
+            
+            // Handle one-line control structures
+            if trimmed.starts_with("if ") || trimmed.starts_with("for ") || trimmed.starts_with("while ") {
+                if !trimmed.ends_with('{') {
+                    indent_level += 1;
+                }
+            }
+        }
+        
+        Ok(formatted)
     }
 
     fn find_symbol_at_position(
@@ -413,24 +443,182 @@ impl IoLanguageServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tower_lsp::lsp_types::*;
+    use std::sync::Arc;
+
+    fn setup_test_server() -> IoLanguageServer {
+        let (client, _) = tower_lsp::ClientSocket::new();
+        IoLanguageServer::new(client)
+    }
 
     #[tokio::test]
     async fn test_completion() {
-        // TODO: Add completion tests
+        let server = setup_test_server();
+        
+        // Add test document
+        let uri = Url::parse("file:///test.io").unwrap();
+        let doc = TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "io".to_string(),
+            version: 1,
+            text: "fn test() {\n    print\n}".to_string(),
+        };
+        server.document_map.insert(uri.clone(), doc);
+        
+        // Test completion at 'print'
+        let completion_params = CompletionParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                position: Position::new(1, 5),
+            },
+            context: None,
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+        };
+        
+        let completions = server.completion(completion_params).await.unwrap();
+        
+        match completions {
+            Some(CompletionResponse::Array(items)) => {
+                assert!(items.iter().any(|item| item.label == "println"));
+            }
+            _ => panic!("Expected completion items"),
+        }
     }
 
     #[tokio::test]
     async fn test_hover() {
-        // TODO: Add hover tests
+        let server = setup_test_server();
+        
+        // Add test document with function
+        let uri = Url::parse("file:///test.io").unwrap();
+        let doc = TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "io".to_string(),
+            version: 1,
+            text: "fn add(a: int, b: int) -> int {\n    return a + b;\n}".to_string(),
+        };
+        server.document_map.insert(uri.clone(), doc);
+        
+        // Analyze document to populate semantic data
+        server.analyze_document(&uri).await.unwrap();
+        
+        // Test hover over function name
+        let hover_params = HoverParams {
+            text_document_position_params: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri },
+                position: Position::new(0, 3), // Position at "add"
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+        };
+        
+        let hover = server.hover(hover_params).await.unwrap();
+        
+        match hover {
+            Some(hover) => {
+                match hover.contents {
+                    HoverContents::Markup(content) => {
+                        assert!(content.value.contains("add"));
+                        assert!(content.value.contains("Function"));
+                    }
+                    _ => panic!("Expected markup content"),
+                }
+            }
+            None => panic!("Expected hover information"),
+        }
     }
 
     #[tokio::test]
     async fn test_goto_definition() {
-        // TODO: Add goto definition tests
+        let server = setup_test_server();
+        
+        // Add test document with variable definition and usage
+        let uri = Url::parse("file:///test.io").unwrap();
+        let doc = TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "io".to_string(),
+            version: 1,
+            text: "let x = 42;\nprint(x);".to_string(),
+        };
+        server.document_map.insert(uri.clone(), doc);
+        
+        // Analyze document
+        server.analyze_document(&uri).await.unwrap();
+        
+        // Test goto definition for variable usage
+        let goto_params = GotoDefinitionParams {
+            text_document_position_params: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                position: Position::new(1, 6), // Position at "x" in print(x)
+            },
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+        };
+        
+        let location = server.goto_definition(goto_params).await.unwrap();
+        
+        match location {
+            Some(GotoDefinitionResponse::Scalar(loc)) => {
+                assert_eq!(loc.uri, uri);
+                assert_eq!(loc.range.start.line, 0); // Definition is on first line
+            }
+            _ => panic!("Expected definition location"),
+        }
     }
 
     #[tokio::test]
     async fn test_formatting() {
-        // TODO: Add formatting tests
+        let server = setup_test_server();
+        
+        // Test unformatted code
+        let unformatted = r#"
+fn test() {
+if true {
+println("nested");
+}
+    return 42;
+}
+"#.trim();
+
+        let expected = r#"fn test() {
+    if true {
+        println("nested");
+    }
+    return 42;
+}
+"#;
+
+        let formatted = server.format_code(unformatted).unwrap();
+        assert_eq!(formatted, expected);
+
+        // Test formatting with multiple nested blocks
+        let unformatted = r#"
+fn complex() {
+if condition {
+for item in items {
+while true {
+println("deep");
+}}}}"#.trim();
+
+        let expected = r#"fn complex() {
+    if condition {
+        for item in items {
+            while true {
+                println("deep");
+            }
+        }
+    }
+}
+"#;
+
+        let formatted = server.format_code(unformatted).unwrap();
+        assert_eq!(formatted, expected);
+
+        // Test formatting with one-line conditions
+        let unformatted = "if true println(\"one line\");";
+        let expected = "if true\n    println(\"one line\");\n";
+        
+        let formatted = server.format_code(unformatted).unwrap();
+        assert_eq!(formatted, expected);
     }
 }

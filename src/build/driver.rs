@@ -159,16 +159,42 @@ impl BuildDriver {
     fn link_objects(&self, config: &BuildConfig) -> Result<()> {
         let mut linker = Linker::new();
         
-        // Add all object files
+        // Add all object files from artifacts directory
         for entry in std::fs::read_dir(&self.artifacts_dir)? {
             let path = entry?.path();
             if path.extension().map_or(false, |ext| ext == "o") {
-                linker.add_object(&path)?;
+                debug!("Adding object file: {}", path.display());
+                linker.add_object_file(&path)?;
             }
         }
-        
-        // Add system libraries
-        linker.add_system_libs()?;
+
+        // Add required system libraries based on target
+        match &config.target {
+            Target::Native => {
+                linker.add_system_lib("c")?;     // libc
+                linker.add_system_lib("m")?;     // libm for math
+                linker.add_system_lib("pthread")?; // Threading support
+                
+                #[cfg(target_os = "linux")]
+                linker.add_system_lib("dl")?;    // Dynamic linking support on Linux
+                
+                #[cfg(target_os = "macos")]
+                {
+                    linker.add_framework("System")?;
+                    linker.add_framework("Foundation")?;
+                }
+            },
+            Target::Wasm32 => {
+                linker.add_wasm_lib("env")?;
+                linker.add_wasm_lib("wasi_snapshot_preview1")?;
+            },
+            _ => {
+                // Add target-specific system libraries
+                for lib in config.target.required_libs() {
+                    linker.add_system_lib(lib)?;
+                }
+            }
+        }
         
         // Configure target-specific linking
         match config.target {

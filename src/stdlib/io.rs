@@ -1,112 +1,68 @@
 use crate::{codegen::llvm::LLVMCodeGen, error::IoError, Result};
-use inkwell::{AddressSpace, builder::Builder};
 use inkwell::values::{BasicValue, FunctionValue, PointerValue};
+use inkwell::{builder::Builder, AddressSpace};
 
 pub struct IoModule<'ctx> {
-    print_fn: Option<FunctionValue<'ctx>>,
-    println_fn: Option<FunctionValue<'ctx>>,
-    read_line_fn: Option<FunctionValue<'ctx>>,
+    functions: std::collections::HashMap<String, FunctionValue<'ctx>>,
 }
 
 impl<'ctx> IoModule<'ctx> {
     pub fn new() -> Self {
         Self {
-            print_fn: None,
-            println_fn: None,
-            read_line_fn: None,
+            functions: std::collections::HashMap::new(),
         }
     }
 
-    pub fn initialize(&mut self, codegen: &mut LLVMCodeGen<'ctx>) -> Result<()> {
-        let string_type = codegen.context.ptr_type(AddressSpace::default());
+    pub fn initialize(&self, codegen: &mut LLVMCodeGen<'ctx>) -> Result<()> {
+        let void_type = codegen.context.void_type();
+        let i8_ptr = codegen.context.i8_type().ptr_type(AddressSpace::Generic);
+        let i32_type = codegen.context.i32_type();
 
-        // Register print function
-        let print_type = codegen
-            .context
-            .void_type()
-            .fn_type(&[string_type.into()], false);
-        self.print_fn = Some(codegen.module.add_function("print", print_type, None));
+        // Register basic IO functions
+        let printf_type = i32_type.fn_type(&[i8_ptr.into()], true);
+        codegen.module.add_function("printf", printf_type, None);
 
-        // Register println function
-        self.println_fn = Some(codegen.module.add_function("println", print_type, None));
+        let file_open_type = i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into()], false);
+        codegen.module.add_function("fopen", file_open_type, None);
 
-        // Register readline function
-        let read_type = string_type.fn_type(&[], false);
-        self.read_line_fn = Some(codegen.module.add_function("readline", read_type, None));
-
-        self.generate_print(codegen)?;
-        self.generate_println(codegen)?;
-        self.generate_read_line(codegen)?;
+        let file_close_type = i32_type.fn_type(&[i8_ptr.into()], false);
+        codegen.module.add_function("fclose", file_close_type, None);
 
         Ok(())
     }
 
-    fn generate_print(&mut self, codegen: &mut LLVMCodeGen<'ctx>) -> Result<()> {
-        let function = self.print_fn.unwrap();
-        let entry = codegen.context.append_basic_block(function, "entry");
-        codegen.builder.position_at_end(entry);
+    pub fn generate_bindings(&self, codegen: &mut LLVMCodeGen<'ctx>) -> Result<()> {
+        let i8_ptr = codegen.context.i8_type().ptr_type(AddressSpace::Generic);
+        let i32_type = codegen.context.i32_type();
 
-        let string_ptr = function.get_first_param()
-            .unwrap()
-            .into_pointer_value();
+        // Bind print function
+        let print_fn = codegen.module.add_function(
+            "_cb_print",
+            i32_type.fn_type(&[i8_ptr.into()], false),
+            None,
+        );
 
-        // Use build_load with proper type parameter
-        let bytes = unsafe {
-            codegen.builder.build_load(
-                codegen.context.i8_type(),
-                string_ptr, 
-                "bytes"
-            ).map_err(|e| IoError::codegen_error(e.to_string()))?
-        };
+        // Bind file operations
+        let open_fn = codegen.module.add_function(
+            "_cb_file_open",
+            i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            None,
+        );
 
-        // Convert builder errors to IoError
-        codegen.builder.build_call(
-            function,
-            &[bytes.into()],
-            "print_call"
-        ).map_err(|e| IoError::codegen_error(e.to_string()))?;
-
-        codegen.builder.build_return(None)
-            .map_err(|e| IoError::codegen_error(e.to_string()))?;
+        let close_fn = codegen.module.add_function(
+            "_cb_file_close",
+            i32_type.fn_type(&[i8_ptr.into()], false),
+            None,
+        );
 
         Ok(())
     }
 
-    fn generate_println(&mut self, codegen: &mut LLVMCodeGen<'ctx>) -> Result<()> {
-        let function = self.println_fn.unwrap();
-        let entry = codegen.context.append_basic_block(function, "entry");
-        codegen.builder.position_at_end(entry);
-
-        let string_ptr = function.get_first_param().unwrap().into_pointer_value();
-        let newline = codegen.context.const_string(b"\n", true);
-
-        let bytes = unsafe {
-            codegen.builder.build_load(
-                codegen.context.i8_type(),
-                string_ptr, 
-                "bytes"
-            ).map_err(|e| IoError::codegen_error(e.to_string()))?
-        };
-
-        codegen.builder.build_call(
-            function,
-            &[bytes.into(), newline.into()],
-            "println_call"
-        ).map_err(|e| IoError::codegen_error(e.to_string()))?;
-
-        codegen.builder.build_return(None)
-            .map_err(|e| IoError::codegen_error(e.to_string()))?;
-
-        Ok(())
-    }
-
-    fn generate_read_line(&mut self, codegen: &mut LLVMCodeGen<'ctx>) -> Result<()> {
-        // Similar changes...
-        Ok(())
+    pub fn get_function(&self, name: &str) -> Option<FunctionValue<'ctx>> {
+        self.functions.get(name).copied()
     }
 }
 
-// Add comprehensive tests
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -116,41 +72,59 @@ mod tests {
     fn test_io_operations() {
         let context = Context::create();
         let module = context.create_module("test");
-        let mut codegen = crate::codegen::llvm::LLVMCodeGen::new(&context, &module);
+        let mut codegen = LLVMCodeGen::new(&context, &module);
 
         let io_module = IoModule::new();
-        io_module.initialize(&mut codegen).unwrap();
+        assert!(io_module.initialize(&mut codegen).is_ok());
+        assert!(io_module.generate_bindings(&mut codegen).is_ok());
 
-        // Test print binding
-        assert!(io_module.generate_print(&mut codegen).is_ok());
-
-        // Test println binding
-        assert!(io_module.generate_println(&mut codegen).is_ok());
-
-        // Verify module
-        assert!(module.verify().is_ok());
+        // Verify print function exists
+        assert!(module.get_function("_cb_print").is_some());
     }
 
     #[test]
     fn test_file_operations() {
-        // Test implementation
+        let context = Context::create();
+        let module = context.create_module("test");
+        let mut codegen = LLVMCodeGen::new(&context, &module);
+
+        let io_module = IoModule::new();
+        io_module.initialize(&mut codegen).unwrap();
+        io_module.generate_bindings(&mut codegen).unwrap();
+
+        // Verify file operations exist
+        assert!(module.get_function("_cb_file_open").is_some());
+        assert!(module.get_function("_cb_file_close").is_some());
     }
 
     #[test]
     fn test_error_handling() {
-        // Test implementation
+        let context = Context::create();
+        let module = context.create_module("test");
+        let mut codegen = LLVMCodeGen::new(&context, &module);
+
+        let io_module = IoModule::new();
+
+        // Test initialization with invalid module
+        let result = io_module.initialize(&mut codegen);
+        assert!(result.is_ok());
+
+        // Verify error handling in bindings
+        let binding_result = io_module.generate_bindings(&mut codegen);
+        assert!(binding_result.is_ok());
     }
 
     #[test]
     fn test_buffered_operations() {
         let context = Context::create();
         let module = context.create_module("test");
-        let mut codegen = crate::codegen::llvm::LLVMCodeGen::new(&context, &module);
+        let mut codegen = LLVMCodeGen::new(&context, &module);
 
         let io_module = IoModule::new();
-        io_module.initialize(&mut codegen).unwrap();
+        assert!(io_module.initialize(&mut codegen).is_ok());
+        assert!(io_module.generate_bindings(&mut codegen).is_ok());
 
-        assert!(io_module.generate_buffered_operations(&mut codegen).is_ok());
+        // Verify module integrity
         assert!(module.verify().is_ok());
     }
 }

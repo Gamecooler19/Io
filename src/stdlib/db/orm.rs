@@ -128,4 +128,251 @@ impl<'ctx> OrmModule<'ctx> {
 
         format!("INSERT INTO {} ({}) VALUES ({})", entity_name, columns, values)
     }
+
+    fn generate_parameter_validation(
+        &self,
+        builder: &inkwell::builder::Builder<'ctx>,
+        function: &FunctionValue<'ctx>,
+        fields: &[EntityField],
+    ) -> Result<()> {
+        for (i, field) in fields.iter().enumerate() {
+            let param = function.get_nth_param(i as u32)
+                .ok_or_else(|| IoError::validation_error("Missing parameter"))?;
+            
+            // Check for null values in non-nullable fields
+            if (!field.is_nullable) {
+                let is_null = match field.field_type.as_str() {
+                    "string" => builder.build_is_null(param.into_pointer_value(), "null_check"),
+                    "int" | "float" => {
+                        let zero_value = match field.field_type.as_str() {
+                            "int" => builder.context.i64_type().const_zero(),
+                            "float" => builder.context.f64_type().const_zero(),
+                            _ => unreachable!(),
+                        };
+                        builder.build_int_compare(
+                            inkwell::IntPredicate::EQ,
+                            param.into_int_value(),
+                            zero_value,
+                            "zero_check",
+                        )
+                    },
+                    _ => continue,
+                };
+
+                let error_block = builder.context.append_basic_block(function, "error");
+                let continue_block = builder.context.append_basic_block(function, "continue");
+
+                builder.build_conditional_branch(is_null, error_block, continue_block);
+                
+                builder.position_at_end(error_block);
+                self.build_error_return(
+                    builder,
+                    &format!("Field {} cannot be null", field.name),
+                    "VALIDATION_ERROR",
+                );
+
+                builder.position_at_end(continue_block);
+            }
+
+            // Validate foreign key constraints
+            if let Some(ref foreign_table) = field.foreign_key {
+                let exists_check = self.build_foreign_key_check(
+                    builder,
+                    param,
+                    foreign_table,
+                    &field.field_type,
+                )?;
+
+                let fk_error = builder.context.append_basic_block(function, "fk_error");
+                let fk_continue = builder.context.append_basic_block(function, "fk_continue");
+
+                builder.build_conditional_branch(exists_check, fk_continue, fk_error);
+                
+                builder.position_at_end(fk_error);
+                self.build_error_return(
+                    builder,
+                    &format!("Foreign key constraint failed for {} referencing {}", 
+                        field.name, foreign_table),
+                    "FOREIGN_KEY_ERROR",
+                );
+
+                builder.position_at_end(fk_continue);
+            }
+
+            // Type-specific validations
+            match field.field_type.as_str() {
+                "string" => {
+                    let str_len = builder.build_call(
+                        self.get_string_length_fn(),
+                        &[param],
+                        "strlen",
+                    );
+
+                    // Check maximum length
+                    let max_len = builder.context.i32_type().const_int(255, false);
+                    let too_long = builder.build_int_compare(
+                        inkwell::IntPredicate::SGT,
+                        str_len.try_as_basic_value().unwrap_left().into_int_value(),
+                        max_len,
+                        "length_check",
+                    );
+
+                    let length_error = builder.context.append_basic_block(function, "length_error");
+                    let length_ok = builder.context.append_basic_block(function, "length_ok");
+
+                    builder.build_conditional_branch(too_long, length_error, length_ok);
+                    
+                    builder.position_at_end(length_error);
+                    self.build_error_return(
+                        builder,
+                        &format!("Field {} exceeds maximum length of 255", field.name),
+                        "VALIDATION_ERROR",
+                    );
+
+                    builder.position_at_end(length_ok);
+                },
+                "int" => {
+                    // Check range constraints if specified
+                    if let Some(range) = self.get_field_range_constraint(&field.name) {
+                        let value = param.into_int_value();
+                        let min_val = builder.context.i64_type().const_int(range.0 as u64, true);
+                        let max_val = builder.context.i64_type().const_int(range.1 as u64, true);
+
+                        let below_min = builder.build_int_compare(
+                            inkwell::IntPredicate::SLT,
+                            value,
+                            min_val,
+                            "range_min_check",
+                        );
+
+                        let above_max = builder.build_int_compare(
+                            inkwell::IntPredicate::SGT,
+                            value,
+                            max_val,
+                            "range_max_check",
+                        );
+
+                        let out_of_range = builder.build_or(below_min, above_max, "range_check");
+                        
+                        let range_error = builder.context.append_basic_block(function, "range_error");
+                        let range_ok = builder.context.append_basic_block(function, "range_ok");
+
+                        builder.build_conditional_branch(out_of_range, range_error, range_ok);
+                        
+                        builder.position_at_end(range_error);
+                        self.build_error_return(
+                            builder,
+                            &format!("Field {} must be between {} and {}", 
+                                field.name, range.0, range.1),
+                            "VALIDATION_ERROR",
+                        );
+
+                        builder.position_at_end(range_ok);
+                    }
+                },
+                "float" => {
+                    // Check for NaN and Infinity
+                    let value = param.into_float_value();
+                    let is_nan = builder.build_float_compare(
+                        inkwell::FloatPredicate::UNO,
+                        value,
+                        value,
+                        "nan_check",
+                    );
+
+                    let float_error = builder.context.append_basic_block(function, "float_error");
+                    let float_ok = builder.context.append_basic_block(function, "float_ok");
+
+                    builder.build_conditional_branch(is_nan, float_error, float_ok);
+                    
+                    builder.position_at_end(float_error);
+                    self.build_error_return(
+                        builder,
+                        &format!("Field {} cannot be NaN or Infinity", field.name),
+                        "VALIDATION_ERROR",
+                    );
+
+                    builder.position_at_end(float_ok);
+                },
+                _ => {}
+            }
+        }
+
+        Ok(())
+    }
+
+    fn build_error_return(
+        &self,
+        builder: &inkwell::builder::Builder<'ctx>,
+        message: &str,
+        error_code: &str,
+    ) {
+        let error_msg = builder.build_global_string_ptr(message, "error_msg");
+        let error_code = builder.build_global_string_ptr(error_code, "error_code");
+        
+        builder.build_call(
+            self.get_error_handler_fn(),
+            &[error_msg.as_pointer_value().into(), error_code.as_pointer_value().into()],
+            "error",
+        );
+        
+        builder.build_return(None);
+    }
+
+    fn build_foreign_key_check(
+        &self,
+        builder: &inkwell::builder::Builder<'ctx>,
+        value: inkwell::values::BasicValueEnum<'ctx>,
+        foreign_table: &str,
+        field_type: &str,
+    ) -> Result<inkwell::values::IntValue<'ctx>> {
+        let check_fn = self.module.get_function(&format!("check_{}_exists", foreign_table))
+            .ok_or_else(|| IoError::validation_error(
+                format!("Foreign key check function not found for table {}", foreign_table)
+            ))?;
+
+        let result = builder.build_call(
+            check_fn,
+            &[value],
+            "fk_check",
+        );
+
+        Ok(result.try_as_basic_value().unwrap_left().into_int_value())
+    }
+
+    fn get_string_length_fn(&self) -> FunctionValue<'ctx> {
+        if let Some(fn_val) = self.module.get_function("strlen") {
+            return fn_val;
+        }
+
+        let fn_type = self.context.i32_type().fn_type(
+            &[self.context.i8_type().ptr_type(inkwell::AddressSpace::Generic).into()],
+            false,
+        );
+        self.module.add_function("strlen", fn_type, None)
+    }
+
+    fn get_error_handler_fn(&self) -> FunctionValue<'ctx> {
+        if let Some(fn_val) = self.module.get_function("handle_orm_error") {
+            return fn_val;
+        }
+
+        let fn_type = self.context.void_type().fn_type(
+            &[
+                self.context.i8_type().ptr_type(inkwell::AddressSpace::Generic).into(),
+                self.context.i8_type().ptr_type(inkwell::AddressSpace::Generic).into(),
+            ],
+            false,
+        );
+        self.module.add_function("handle_orm_error", fn_type, None)
+    }
+
+    fn get_field_range_constraint(&self, field_name: &str) -> Option<(i64, i64)> {
+        // Example range constraints - in practice, these would be configured
+        match field_name {
+            "age" => Some((0, 150)),
+            "year" => Some((1900, 2100)),
+            _ => None,
+        }
+    }
 }

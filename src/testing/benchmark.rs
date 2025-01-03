@@ -116,22 +116,94 @@ impl BenchmarkResults {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn memory_usage() -> usize {
-    // Get current process memory usage
-    // This is a simplified version - in production, use proper system APIs
-    std::process::Command::new("ps")
-        .args(&["ux", &std::process::id().to_string()])
-        .output()
-        .map(|output| {
-            String::from_utf8_lossy(&output.stdout)
-                .lines()
+    use std::fs::File;
+    use std::io::Read;
+
+    // Try to read from /proc/self/statm
+    if let Ok(mut file) = File::open("/proc/self/statm") {
+        let mut contents = String::new();
+        if file.read_to_string(&mut contents).is_ok() {
+            if let Some(rss) = contents
+                .split_whitespace()
                 .nth(1)
-                .and_then(|line| {
-                    line.split_whitespace()
-                        .nth(5)
-                        .and_then(|mem| mem.parse::<usize>().ok())
-                })
-                .unwrap_or(0)
-        })
-        .unwrap_or(0)
+                .and_then(|s| s.parse::<usize>().ok())
+            {
+                return rss * page_size();
+            }
+        }
+    }
+
+    // Fallback to /proc/self/status
+    if let Ok(mut file) = File::open("/proc/self/status") {
+        let mut contents = String::new();
+        if file.read_to_string(&mut contents).is_ok() {
+            if let Some(line) = contents.lines().find(|l| l.starts_with("VmRSS:")) {
+                if let Some(kb) = line
+                    .split_whitespace()
+                    .nth(1)
+                    .and_then(|s| s.parse::<usize>().ok())
+                {
+                    return kb * 1024;
+                }
+            }
+        }
+    }
+
+    0
+}
+
+#[cfg(target_os = "macos")]
+fn memory_usage() -> usize {
+    use mach::task::{task_info, task_info_t};
+    use mach::task_info::TASK_VM_INFO;
+    use mach::vm_types::integer_t;
+    use mach::{message::mach_msg_type_number_t, traps::mach_task_self};
+
+    let mut info: task_vm_info = unsafe { std::mem::zeroed() };
+    let mut count = TASK_VM_INFO_COUNT;
+
+    unsafe {
+        let kr = task_info(
+            mach_task_self(),
+            TASK_VM_INFO,
+            &mut info as *mut task_vm_info as task_info_t,
+            &mut count as *mut mach_msg_type_number_t,
+        );
+        if kr == KERN_SUCCESS {
+            return info.resident_size as usize;
+        }
+    }
+    0
+}
+
+#[cfg(target_os = "windows")]
+fn memory_usage() -> usize {
+    use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+    use windows::Win32::System::Threading::{GetCurrentProcess, PROCESS_QUERY_INFORMATION};
+
+    let handle = unsafe { GetCurrentProcess() };
+    let mut pmc: PROCESS_MEMORY_COUNTERS = unsafe { std::mem::zeroed() };
+    
+    if unsafe { GetProcessMemoryInfo(handle, &mut pmc, std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32) }.is_ok() {
+        return pmc.WorkingSetSize as usize;
+    }
+    0
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn memory_usage() -> usize {
+    // Fallback for unsupported platforms
+    0
+}
+
+#[cfg(target_os = "linux")]
+fn page_size() -> usize {
+    use libc::sysconf;
+    use libc::_SC_PAGESIZE;
+    
+    unsafe {
+        sysconf(_SC_PAGESIZE) as usize
+    }
 }

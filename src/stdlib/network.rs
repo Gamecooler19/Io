@@ -1,4 +1,5 @@
 use crate::{codegen::llvm::LLVMCodeGen, error::IoError, Result};
+use inkwell::types::BasicMetadataTypeEnum;
 use inkwell::AddressSpace;
 use inkwell::{context::Context, types::BasicType, values::FunctionValue};
 use std::{
@@ -109,17 +110,18 @@ impl<'ctx> NetworkModule<'ctx> {
 
     pub fn register_network_functions(&mut self, codegen: &mut LLVMCodeGen<'ctx>) -> Result<()> {
         let i32_type = self.context.i32_type();
-        let i8_ptr = self.context.i8_type().ptr_type(Default::default());
+        let i8_ptr = self.context.ptr_type(AddressSpace::default());
 
-        // Register network functions
-        let connect_type = i32_type.fn_type(&[i8_ptr.into()], false);
-        let connect_fn = codegen
-            .module
-            .add_function("net_connect", connect_type, None);
-        self.functions.insert("connect".to_string(), connect_fn);
+        let metadata_types: Vec<BasicMetadataTypeEnum<'ctx>> =
+            vec![i32_type.into(), i32_type.into(), i32_type.into()];
+
+        let socket_fn_type = i32_type.fn_type(&metadata_types, false);
+
+        let _ = codegen.module.add_function("socket", socket_fn_type, None);
 
         self.register_tcp_functions(codegen)?;
         self.register_udp_functions(codegen)?;
+        self.register_dns_functions(codegen)?;
 
         Ok(())
     }
@@ -165,53 +167,125 @@ impl<'ctx> NetworkModule<'ctx> {
         Ok(())
     }
 
-    fn register_network_functions(&mut self, codegen: &mut LLVMCodeGen<'ctx>) -> Result<()> {
-        let socket_type = self.socket_type.unwrap();
-        let addr_type = self.addr_type.unwrap();
+    fn register_tls_functions(&mut self, codegen: &mut LLVMCodeGen<'ctx>) -> Result<()> {
+        let i8_ptr = codegen.context.ptr_type(AddressSpace::default());
         let i32_type = codegen.context.i32_type();
-        let void_type = codegen.context.void_type();
 
-        // Socket creation
-        let socket_fn = codegen.module.add_function(
-            "socket",
-            socket_type.fn_type(&[i32_type.into(), i32_type.into(), i32_type.into()], false),
-            None,
-        );
+        // TLS initialization
+        let init_tls_fn_type = i32_type.fn_type(&[i8_ptr.into()], false);
+        codegen
+            .module
+            .add_function("tls_init", init_tls_fn_type, None);
 
-        // Bind
-        let bind_fn = codegen.module.add_function(
-            "bind",
-            i32_type.fn_type(
-                &[
-                    socket_type.into(),
-                    addr_type.ptr_type(AddressSpace::default()).into(),
-                ],
-                false,
-            ),
-            None,
-        );
-
-        // Listen
-        let listen_fn = codegen.module.add_function(
-            "listen",
-            i32_type.fn_type(&[socket_type.into(), i32_type.into()], false),
-            None,
-        );
-
-        // Accept
-        let accept_fn = codegen.module.add_function(
-            "accept",
-            socket_type.fn_type(
-                &[
-                    socket_type.into(),
-                    addr_type.ptr_type(AddressSpace::default()).into(),
-                ],
-                false,
-            ),
-            None,
-        );
+        // TLS connect
+        let connect_tls_fn_type = i32_type.fn_type(&[i32_type.into(), i8_ptr.into()], false);
+        codegen
+            .module
+            .add_function("tls_connect", connect_tls_fn_type, None);
 
         Ok(())
+    }
+
+    fn register_dns_functions(&mut self, codegen: &mut LLVMCodeGen<'ctx>) -> Result<()> {
+        let i8_ptr = codegen.context.ptr_type(AddressSpace::default());
+
+        // DNS resolve
+        let resolve_fn_type = i8_ptr.fn_type(&[i8_ptr.into()], false);
+        codegen
+            .module
+            .add_function("dns_resolve", resolve_fn_type, None);
+
+        // DNS reverse lookup
+        let reverse_fn_type = i8_ptr.fn_type(&[i8_ptr.into()], false);
+        codegen
+            .module
+            .add_function("dns_reverse", reverse_fn_type, None);
+
+        Ok(())
+    }
+
+    fn register_tcp_functions(&mut self, codegen: &mut LLVMCodeGen<'ctx>) -> Result<()> {
+        let i32_type = self.context.i32_type();
+        let i8_ptr_type = self.context.i8_type().ptr_type(Default::default());
+
+        let connect_fn_type = i32_type.fn_type(&[i8_ptr_type.into(), i32_type.into()], false);
+        let connect_fn = codegen
+            .module
+            .add_function("tcp_connect", connect_fn_type, None);
+        self.functions.insert("tcp_connect".to_string(), connect_fn);
+
+        let send_fn_type = i32_type.fn_type(
+            &[
+                i32_type.into(),    // socket fd
+                i8_ptr_type.into(), // buffer
+                i32_type.into(),    // length
+            ],
+            false,
+        );
+        let send_fn = codegen.module.add_function("tcp_send", send_fn_type, None);
+        self.functions.insert("tcp_send".to_string(), send_fn);
+        Ok(())
+    }
+
+    fn register_udp_functions(&mut self, codegen: &mut LLVMCodeGen<'ctx>) -> Result<()> {
+        let i32_type = self.context.i32_type();
+        let i8_ptr_type = self.context.i8_type().ptr_type(Default::default());
+
+        let socket_fn_type = i32_type.fn_type(&[], false);
+        let socket_fn = codegen
+            .module
+            .add_function("udp_socket", socket_fn_type, None);
+        self.functions.insert("udp_socket".to_string(), socket_fn);
+
+        let sendto_fn_type = i32_type.fn_type(
+            &[
+                i32_type.into(),    // socket fd
+                i8_ptr_type.into(), // buffer
+                i32_type.into(),    // length
+                i8_ptr_type.into(), // destination address
+                i32_type.into(),    // address length
+            ],
+            false,
+        );
+        let sendto_fn = codegen
+            .module
+            .add_function("udp_sendto", sendto_fn_type, None);
+        self.functions.insert("udp_sendto".to_string(), sendto_fn);
+        Ok(())
+    }
+
+    fn register_http_functions(&mut self, codegen: &mut LLVMCodeGen<'ctx>) -> Result<()> {
+        let i8_ptr_type = self.context.i8_type().ptr_type(Default::default());
+        let get_fn_type = i8_ptr_type.fn_type(&[i8_ptr_type.into()], false);
+        let get_fn = codegen.module.add_function("http_get", get_fn_type, None);
+        self.functions.insert("http_get".to_string(), get_fn);
+
+        let post_fn_type = i8_ptr_type.fn_type(&[i8_ptr_type.into(), i8_ptr_type.into()], false);
+        let post_fn = codegen.module.add_function("http_post", post_fn_type, None);
+        self.functions.insert("http_post".to_string(), post_fn);
+        Ok(())
+    }
+}
+
+pub fn open_connection(address: &str) -> Result<()> {
+    // Parse address into host and port
+    let parts: Vec<&str> = address.split(':').collect();
+    if parts.len() != 2 {
+        return Err(IoError::runtime_error("Invalid address format"));
+    }
+
+    let host = parts[0];
+    let port = parts[1]
+        .parse::<u16>()
+        .map_err(|_| IoError::runtime_error("Invalid port number"))?;
+
+    // Try to establish TCP connection
+    match TcpStream::connect((host, port)) {
+        Ok(_stream) => {
+            // Connection successful
+            Ok(())
+        }
+        Err(e) => Err(IoError::runtime_error(&format!("Failed to connect: {}", e))),
     }
 }
 

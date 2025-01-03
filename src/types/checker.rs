@@ -1,6 +1,6 @@
 use crate::{
     ast::{ASTNode, BinaryOperator, Parameter},
-    error::IoError,
+    error::{self, IoError},
     types::Type,
     Result,
 };
@@ -25,13 +25,13 @@ impl TypeChecker {
 
     fn init_builtin_types(&mut self) {
         let builtins = vec![
-            ("i32", Type::Int),
-            ("i64", Type::Int),
-            ("f32", Type::Float),
-            ("f64", Type::Float),
+            ("i32", Type::I32),
+            ("i64", Type::I64),
+            ("f32", Type::F32),
+            ("f64", Type::F64),
             ("bool", Type::Bool),
             ("str", Type::String),
-            ("void", Type::Unit),
+            ("void", Type::Void),
         ];
 
         for (name, ty) in builtins {
@@ -39,27 +39,27 @@ impl TypeChecker {
         }
     }
 
-    pub fn check_node(&mut self, node: &ASTNode) -> Result<Type> {
+    fn check_node(&mut self, node: &ASTNode) -> Result<Type> {
         match node {
+            ASTNode::IntLiteral { .. } => Ok(Type::Int),
+            ASTNode::FloatLiteral { .. } => Ok(Type::Float),
+            ASTNode::StringLiteral { .. } => Ok(Type::String),
+            ASTNode::BoolLiteral { .. } => Ok(Type::Bool),
+            ASTNode::Identifier { name, .. } => self.check_identifier(name),
+            ASTNode::BinaryOp {
+                op, left, right, ..
+            } => self.check_binary_op(op, left, right),
+            ASTNode::Call { name, args, .. } => self.check_call(name, args),
             ASTNode::Function {
                 name,
                 params,
                 return_type,
                 body,
                 is_async,
-                location: _,
+                ..
             } => self.check_function(name, params, return_type, body, *is_async),
-            ASTNode::BinaryOp { op, left, right } => self.check_binary_op(op, left, right),
-            ASTNode::Call { name, args } => self.check_call(name, args),
-            ASTNode::Identifier(name) => self.check_identifier(name),
-            ASTNode::IntegerLiteral(_) => Ok(Type::Int),
-            ASTNode::FloatLiteral(_) => Ok(Type::Float),
-            ASTNode::BooleanLiteral(_) => Ok(Type::Bool),
-            ASTNode::StringLiteral(_) => Ok(Type::String),
-            ASTNode::Return { value } => self.check_return(value.as_deref()),
-            ASTNode::Loop { body } => self.check_loop(body),
-            ASTNode::Break => self.check_break(),
-            ASTNode::Continue => self.check_continue(),
+            ASTNode::Return { value, .. } => self.check_return(value),
+            ASTNode::Block { statements, .. } => self.check_block(statements),
             _ => Err(IoError::type_error("Unsupported node type")),
         }
     }
@@ -131,63 +131,33 @@ impl TypeChecker {
         let right_type = self.check_node(right)?;
 
         match op {
+            BinaryOperator::Add
+            | BinaryOperator::Subtract
+            | BinaryOperator::Multiply
+            | BinaryOperator::Divide => match (&left_type, &right_type) {
+                (Type::Int, Type::Int) => Ok(Type::Int),
+                (Type::Float, Type::Float) => Ok(Type::Float),
+                _ => Err(error::IoError::type_error("Invalid operand types")),
+            },
             BinaryOperator::Equal | BinaryOperator::NotEqual => {
                 if left_type != right_type {
-                    bail!("Type mismatch in comparison")
+                    return Err(IoError::type_error("Type mismatch in comparison"));
                 }
                 Ok(Type::Bool)
             }
             BinaryOperator::LessThan
             | BinaryOperator::LessThanEqual
             | BinaryOperator::GreaterThan
-            | BinaryOperator::GreaterThanEqual => {
-                if !matches!(left_type, Type::Int | Type::Float) || left_type != right_type {
-                    bail!("Invalid types for comparison")
-                }
-                Ok(Type::Bool)
-            }
-            BinaryOperator::Add
-            | BinaryOperator::Subtract
-            | BinaryOperator::Multiply
-            | BinaryOperator::Divide => {
-                if !self.types_match(&left_type, &right_type) {
-                    return Err(IoError::type_error(format!(
-                        "Type mismatch in binary operation: {:?} vs {:?}",
-                        left_type, right_type
-                    )));
-                }
-                if !matches!(left_type, Type::Int | Type::Float) {
-                    return Err(IoError::type_error(
-                        "Arithmetic operations only support numeric types",
-                    ));
-                }
-                Ok(left_type)
-            }
-            BinaryOperator::Equals | BinaryOperator::NotEquals => {
-                if !self.types_match(&left_type, &right_type) {
-                    return Err(IoError::type_error("Can't compare different types"));
-                }
-                Ok(Type::Bool)
-            }
-            BinaryOperator::Less
-            | BinaryOperator::LessEqual
-            | BinaryOperator::Greater
-            | BinaryOperator::GreaterEqual => {
-                if !self.types_match(&left_type, &right_type)
-                    || !matches!(left_type, Type::Int | Type::Float)
-                {
-                    return Err(IoError::type_error("Invalid types for comparison"));
-                }
-                Ok(Type::Bool)
-            }
-            BinaryOperator::And | BinaryOperator::Or => {
-                if !matches!(left_type, Type::Bool) || !matches!(right_type, Type::Bool) {
-                    return Err(IoError::type_error(
-                        "Logical operators require boolean operands",
-                    ));
-                }
-                Ok(Type::Bool)
-            }
+            | BinaryOperator::GreaterThanEqual => match (&left_type, &right_type) {
+                (Type::Int | Type::Float, Type::Int | Type::Float) => Ok(Type::Bool),
+                _ => Err(error::IoError::type_error("Invalid comparison types")),
+            },
+            BinaryOperator::And | BinaryOperator::Or => match (&left_type, &right_type) {
+                (Type::Bool, Type::Bool) => Ok(Type::Bool),
+                _ => Err(IoError::type_error(
+                    "Logical operators require boolean operands",
+                )),
+            },
         }
     }
 
@@ -225,11 +195,33 @@ impl TypeChecker {
         }
     }
 
-    fn check_return(&mut self, value: Option<&ASTNode>) -> Result<Type> {
+    fn check_return(&self, value: Option<&ASTNode>) -> Result<Type> {
+        let return_type = self
+            .current_function_return_type
+            .as_ref()
+            .ok_or_else(|| IoError::type_error("Return statement outside of function"))?;
+
         match value {
-            Some(expr) => self.check_node(expr),
-            None => Ok(Type::Void),
+            Some(expr) => {
+                let expr_type = self.check_node(expr)?;
+                if !self.types_match(&expr_type, return_type) {
+                    return Err(IoError::type_error(format!(
+                        "Return type mismatch: expected {:?}, got {:?}",
+                        return_type, expr_type
+                    )));
+                }
+            }
+            None => {
+                if !matches!(return_type, Type::Unit) {
+                    return Err(IoError::type_error(format!(
+                        "Function must return {:?}",
+                        return_type
+                    )));
+                }
+            }
         }
+
+        Ok(Type::Unit)
     }
 
     fn check_loop(&mut self, body: &[ASTNode]) -> Result<Type> {
@@ -299,6 +291,35 @@ impl TypeChecker {
 
             _ => false,
         }
+    }
+
+    fn check_string_operation(
+        &mut self,
+        op: &BinaryOperator,
+        left: &ASTNode,
+        right: &ASTNode,
+    ) -> Result<Type> {
+        let left_type = self.check_node(left)?;
+        let right_type = self.check_node(right)?;
+
+        match (left_type, right_type) {
+            (Type::String, Type::String) => {
+                match op {
+                    BinaryOperator::Add => Ok(Type::String), // String concatenation
+                    BinaryOperator::Equal | BinaryOperator::NotEqual => Ok(Type::Bool),
+                    _ => Err(IoError::type_error("Invalid string operation")),
+                }
+            }
+            _ => Err(IoError::type_error("Operation requires string operands")),
+        }
+    }
+
+    fn check_block(&mut self, statements: &[ASTNode]) -> Result<Type> {
+        let mut block_type = Type::Void;
+        for stmt in statements {
+            block_type = self.check_node(stmt)?;
+        }
+        Ok(block_type)
     }
 }
 

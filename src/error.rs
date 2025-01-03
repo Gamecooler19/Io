@@ -1,80 +1,116 @@
 use std::{fmt, io};
 
+pub type Result<T> = std::result::Result<T, IoError>;
+
 #[derive(Debug)]
-pub enum IoError {
-    LexerError { position: usize, message: String },
-    ParserError { message: String },
-    TypeError { message: String },
-    RuntimeError { message: String },
-    VerificationError { message: String },
-    NetworkError(String),
-    Io(io::Error),
+pub enum ErrorKind {
+    TypeError,
+    RuntimeError,
+    SyntaxError,
+    LexerError,
+    ParserError,
+    CodegenError,
+    NetworkError,
+    Io,
+    VerificationError,
+    BuilderError,
+    IntrinsicError,
+    LinkageError,
+    ParseError,
+    TypeMismatch,
+    DivisionByZero,
+    ModuleNotFound,
+    CircularDependency,
+    ValidationError,
+    ConcurrencyError,
+}
+
+#[derive(Debug)]
+pub struct IoError {
+    kind: ErrorKind,
+    message: String,
 }
 
 impl IoError {
     pub fn lexer_error(position: usize, message: impl Into<String>) -> Self {
-        Self::LexerError {
-            position,
-            message: message.into(),
+        Self {
+            kind: ErrorKind::LexerError,
+            message: format!("Lexer error at position {}: {}", position, message.into()),
         }
     }
 
     pub fn parser_error(message: impl Into<String>) -> Self {
-        Self::ParserError {
+        Self {
+            kind: ErrorKind::ParserError,
             message: message.into(),
         }
     }
 
     pub fn type_error(message: impl Into<String>) -> Self {
-        Self::TypeError {
+        Self {
+            kind: ErrorKind::TypeError,
             message: message.into(),
         }
     }
 
     pub fn runtime_error(message: impl Into<String>) -> Self {
-        Self::RuntimeError {
+        Self {
+            kind: ErrorKind::RuntimeError,
             message: message.into(),
         }
     }
 
-    pub fn validation_error(message: impl Into<String>) -> Self {
-        Self::VerificationError {
+    pub fn codegen_error(message: impl Into<String>) -> Self {
+        Self {
+            kind: ErrorKind::CodegenError,
             message: message.into(),
         }
     }
 
-    pub fn macro_error(message: impl Into<String>) -> Self {
-        Self::RuntimeError {
-            message: message.into(),
+    // Add missing error variants
+    pub fn stack_overflow() -> Self {
+        Self {
+            kind: ErrorKind::RuntimeError,
+            message: "Stack overflow".into(),
         }
     }
 
-    pub fn debug_error(message: impl Into<String>) -> Self {
-        Self::RuntimeError {
-            message: message.into(),
+    pub fn out_of_memory() -> Self {
+        Self {
+            kind: ErrorKind::RuntimeError,
+            message: "Out of memory".into(),
+        }
+    }
+
+    pub fn deadlock(msg: impl Into<String>) -> Self {
+        Self {
+            kind: ErrorKind::RuntimeError,
+            message: format!("Deadlock: {}", msg.into()),
         }
     }
 }
 
 impl From<io::Error> for IoError {
     fn from(err: io::Error) -> Self {
-        IoError::Io(err)
+        IoError {
+            kind: ErrorKind::Io,
+            message: err.to_string(),
+        }
+    }
+}
+
+impl From<inkwell::builder::BuilderError> for IoError {
+    fn from(err: inkwell::builder::BuilderError) -> Self {
+        Self {
+            kind: ErrorKind::BuilderError,
+            message: err.to_string(),
+        }
     }
 }
 
 impl fmt::Display for IoError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            IoError::LexerError { position, message } => {
-                write!(f, "Lexer error at position {}: {}", position, message)
-            }
-            IoError::ParserError { message } => write!(f, "Parser error: {}", message),
-            IoError::TypeError { message } => write!(f, "Type error: {}", message),
-            IoError::RuntimeError { message } => write!(f, "Runtime error: {}", message),
-            IoError::VerificationError { message } => write!(f, "Verification error: {}", message),
-            IoError::NetworkError(msg) => write!(f, "Network error: {}", msg),
-            IoError::Io(err) => write!(f, "IO error: {}", err),
-        }
+        write!(f, "{}", self.message)
     }
 }
 

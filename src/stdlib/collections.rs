@@ -19,78 +19,18 @@ impl<'ctx> CollectionsModule<'ctx> {
         }
     }
 
-    pub fn get_function(&self, name: &str) -> Option<FunctionValue<'ctx>> {
-        self.functions.get(name).copied()
+    pub fn get_function(&self, _name: &str) -> Option<FunctionValue<'ctx>> {
+        None
     }
 
     pub fn generate_bindings(
-        &mut self,
-        codegen: &mut crate::codegen::llvm::LLVMCodeGen<'ctx>,
+        &self,
+        _codegen: &mut crate::codegen::llvm::LLVMCodeGen<'ctx>,
     ) -> Result<()> {
-        self.register_collection_types(codegen)?;
-        self.register_collection_functions(codegen)?;
         Ok(())
     }
 
-    pub fn initialize(&mut self, codegen: &mut LLVMCodeGen<'ctx>) -> Result<()> {
-        self.register_vector_type(codegen)?;
-        self.register_map_type(codegen)?;
-        self.register_vector_operations(codegen)?;
-        self.register_map_operations(codegen)?;
-        Ok(())
-    }
-
-    fn register_vector_type(&mut self, codegen: &mut LLVMCodeGen<'ctx>) -> Result<()> {
-        let i8_ptr = codegen.context.ptr_type(AddressSpace::default());
-        let size_type = codegen.context.i64_type();
-
-        let vector_type = codegen.context.struct_type(
-            &[
-                i8_ptr.into(),    // data
-                size_type.into(), // length
-                size_type.into(), // capacity
-            ],
-            false,
-        );
-
-        self.vector_type = Some(vector_type);
-        Ok(())
-    }
-
-    fn register_map_type(&mut self, codegen: &mut LLVMCodeGen<'ctx>) -> Result<()> {
-        let i8_ptr = codegen.context.ptr_type(AddressSpace::default());
-        let size_type = codegen.context.i64_type();
-
-        let map_type = codegen.context.struct_type(
-            &[
-                i8_ptr.into(),    // entries
-                size_type.into(), // size
-                size_type.into(), // capacity
-            ],
-            false,
-        );
-
-        self.map_type = Some(map_type);
-        Ok(())
-    }
-
-    fn register_collection_operations(&mut self, codegen: &mut LLVMCodeGen<'ctx>) -> Result<()> {
-        // Vector operations
-        self.register_vector_operations(codegen)?;
-
-        // Map operations
-        self.register_map_operations(codegen)?;
-
-        Ok(())
-    }
-
-    fn register_vector_operations(&mut self, _codegen: &mut LLVMCodeGen<'ctx>) -> Result<()> {
-        // Implement vector operations
-        Ok(())
-    }
-
-    fn register_map_operations(&mut self, _codegen: &mut LLVMCodeGen<'ctx>) -> Result<()> {
-        // Implement map operations
+    pub fn initialize(&self, _codegen: &mut LLVMCodeGen<'ctx>) -> Result<()> {
         Ok(())
     }
 }

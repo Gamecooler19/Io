@@ -32,11 +32,61 @@ impl ConstantPropagator {
 
     fn evaluate_binary_const(&self, op: &BinaryOperator, left: &ConstValue, right: &ConstValue) -> Option<ConstValue> {
         match (left, right, op) {
+            // Integer operations
             (ConstValue::Int(l), ConstValue::Int(r), BinaryOperator::Add) => Some(ConstValue::Int(l + r)),
             (ConstValue::Int(l), ConstValue::Int(r), BinaryOperator::Subtract) => Some(ConstValue::Int(l - r)),
             (ConstValue::Int(l), ConstValue::Int(r), BinaryOperator::Multiply) => Some(ConstValue::Int(l * r)),
             (ConstValue::Int(l), ConstValue::Int(r), BinaryOperator::Divide) if *r != 0 => Some(ConstValue::Int(l / r)),
-            // Add more constant folding rules...
+            (ConstValue::Int(l), ConstValue::Int(r), BinaryOperator::Modulo) if *r != 0 => Some(ConstValue::Int(l % r)),
+            (ConstValue::Int(l), ConstValue::Int(r), BinaryOperator::BitwiseAnd) => Some(ConstValue::Int(l & r)),
+            (ConstValue::Int(l), ConstValue::Int(r), BinaryOperator::BitwiseOr) => Some(ConstValue::Int(l | r)),
+            (ConstValue::Int(l), ConstValue::Int(r), BinaryOperator::BitwiseXor) => Some(ConstValue::Int(l ^ r)),
+            (ConstValue::Int(l), ConstValue::Int(r), BinaryOperator::LeftShift) => Some(ConstValue::Int(l << r)),
+            (ConstValue::Int(l), ConstValue::Int(r), BinaryOperator::RightShift) => Some(ConstValue::Int(l >> r)),
+
+            // Float operations
+            (ConstValue::Float(l), ConstValue::Float(r), BinaryOperator::Add) => Some(ConstValue::Float(l + r)),
+            (ConstValue::Float(l), ConstValue::Float(r), BinaryOperator::Subtract) => Some(ConstValue::Float(l - r)),
+            (ConstValue::Float(l), ConstValue::Float(r), BinaryOperator::Multiply) => Some(ConstValue::Float(l * r)),
+            (ConstValue::Float(l), ConstValue::Float(r), BinaryOperator::Divide) if *r != 0.0 => Some(ConstValue::Float(l / r)),
+            (ConstValue::Float(l), ConstValue::Float(r), BinaryOperator::Power) => Some(ConstValue::Float(l.powf(*r))),
+
+            // String operations
+            (ConstValue::String(l), ConstValue::String(r), BinaryOperator::Add) => Some(ConstValue::String(format!("{}{}", l, r))),
+            
+            // Boolean operations
+            (ConstValue::Bool(l), ConstValue::Bool(r), BinaryOperator::And) => Some(ConstValue::Bool(*l && *r)),
+            (ConstValue::Bool(l), ConstValue::Bool(r), BinaryOperator::Or) => Some(ConstValue::Bool(*l || *r)),
+            (ConstValue::Bool(l), ConstValue::Bool(r), BinaryOperator::Xor) => Some(ConstValue::Bool(*l ^ *r)),
+
+            // Comparison operations for integers
+            (ConstValue::Int(l), ConstValue::Int(r), BinaryOperator::Equal) => Some(ConstValue::Bool(l == r)),
+            (ConstValue::Int(l), ConstValue::Int(r), BinaryOperator::NotEqual) => Some(ConstValue::Bool(l != r)),
+            (ConstValue::Int(l), ConstValue::Int(r), BinaryOperator::LessThan) => Some(ConstValue::Bool(l < r)),
+            (ConstValue::Int(l), ConstValue::Int(r), BinaryOperator::LessEqual) => Some(ConstValue::Bool(l <= r)),
+            (ConstValue::Int(l), ConstValue::Int(r), BinaryOperator::GreaterThan) => Some(ConstValue::Bool(l > r)),
+            (ConstValue::Int(l), ConstValue::Int(r), BinaryOperator::GreaterEqual) => Some(ConstValue::Bool(l >= r)),
+
+            // Comparison operations for floats
+            (ConstValue::Float(l), ConstValue::Float(r), BinaryOperator::Equal) => Some(ConstValue::Bool(l == r)),
+            (ConstValue::Float(l), ConstValue::Float(r), BinaryOperator::NotEqual) => Some(ConstValue::Bool(l != r)),
+            (ConstValue::Float(l), ConstValue::Float(r), BinaryOperator::LessThan) => Some(ConstValue::Bool(l < r)),
+            (ConstValue::Float(l), ConstValue::Float(r), BinaryOperator::LessEqual) => Some(ConstValue::Bool(l <= r)),
+            (ConstValue::Float(l), ConstValue::Float(r), BinaryOperator::GreaterThan) => Some(ConstValue::Bool(l > r)),
+            (ConstValue::Float(l), ConstValue::Float(r), BinaryOperator::GreaterEqual) => Some(ConstValue::Bool(l >= r)),
+
+            // String comparison
+            (ConstValue::String(l), ConstValue::String(r), BinaryOperator::Equal) => Some(ConstValue::Bool(l == r)),
+            (ConstValue::String(l), ConstValue::String(r), BinaryOperator::NotEqual) => Some(ConstValue::Bool(l != r)),
+            (ConstValue::String(l), ConstValue::String(r), BinaryOperator::LessThan) => Some(ConstValue::Bool(l < r)),
+            (ConstValue::String(l), ConstValue::String(r), BinaryOperator::LessEqual) => Some(ConstValue::Bool(l <= r)),
+            (ConstValue::String(l), ConstValue::String(r), BinaryOperator::GreaterThan) => Some(ConstValue::Bool(l > r)),
+            (ConstValue::String(l), ConstValue::String(r), BinaryOperator::GreaterEqual) => Some(ConstValue::Bool(l >= r)),
+
+            // Mixed numeric operations (int-float conversions)
+            (ConstValue::Int(l), ConstValue::Float(r), op) => self.evaluate_binary_const(op, &ConstValue::Float(*l as f64), right),
+            (ConstValue::Float(l), ConstValue::Int(r), op) => self.evaluate_binary_const(op, left, &ConstValue::Float(*r as f64)),
+
             _ => None,
         }
     }
@@ -207,5 +257,44 @@ mod tests {
         
         // Should be optimized to just the then branch
         assert!(matches!(result, ASTNode::Block(nodes) if nodes.len() == 1));
+    }
+
+    #[test]
+    fn test_float_operations() {
+        let mut propagator = ConstantPropagator::new();
+        let ast = ASTNode::BinaryOperation {
+            left: Box::new(ASTNode::FloatLiteral(2.5)),
+            operator: BinaryOperator::Add,
+            right: Box::new(ASTNode::FloatLiteral(3.5)),
+        };
+
+        let result = propagator.optimize(&ast).unwrap();
+        assert!(matches!(result, ASTNode::FloatLiteral(6.0)));
+    }
+
+    #[test]
+    fn test_string_concatenation() {
+        let mut propagator = ConstantPropagator::new();
+        let ast = ASTNode::BinaryOperation {
+            left: Box::new(ASTNode::StringLiteral("Hello, ".to_string())),
+            operator: BinaryOperator::Add,
+            right: Box::new(ASTNode::StringLiteral("World!".to_string())),
+        };
+
+        let result = propagator.optimize(&ast).unwrap();
+        assert!(matches!(result, ASTNode::StringLiteral(s) if s == "Hello, World!"));
+    }
+
+    #[test]
+    fn test_mixed_numeric_operations() {
+        let mut propagator = ConstantPropagator::new();
+        let ast = ASTNode::BinaryOperation {
+            left: Box::new(ASTNode::IntegerLiteral(2)),
+            operator: BinaryOperator::Multiply,
+            right: Box::new(ASTNode::FloatLiteral(3.5)),
+        };
+
+        let result = propagator.optimize(&ast).unwrap();
+        assert!(matches!(result, ASTNode::FloatLiteral(7.0)));
     }
 }

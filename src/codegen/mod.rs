@@ -3,24 +3,28 @@ pub mod llvm;
 pub mod passes;
 pub mod types;
 
-use crate::error::IoError;
-use crate::Result;
-use std::path::Path;
+use crate::{
+    ast::{ASTNode, Declaration, Module as AstModule, Parameter},
+    error::IoError,
+    types::Type,
+};
+use inkwell::{
+    builder::Builder,
+    context::Context,
+    module::Module,
+    passes::PassManager,
+    types::BasicTypeEnum,
+    values::{BasicValueEnum, FunctionValue},
+};
+use std::{collections::HashMap, path::Path};
 
-pub trait CodeGenerator {
-    /// Initialize the code generator
+pub trait CodeGenTrait {
     fn initialize(&mut self) -> Result<()>;
-
-    /// Generate code for a module
-    fn generate_module(&mut self, ast: &crate::ast::Module) -> Result<()>;
-
-    /// Write output to file
+    fn generate_module(&mut self, ast: &AstModule) -> Result<()>;
     fn write_output<P: AsRef<Path>>(&self, path: P) -> Result<()>;
-
-    /// Perform optimizations
+    fn generate_module(&mut self, ast: &AstModule) -> Result<()>;
+    fn write_output<P: AsRef<Path>>(&self, path: P) -> Result<()>;
     fn optimize(&mut self) -> Result<()>;
-
-    /// Verify generated code
     fn verify(&self) -> Result<()>;
 }
 
@@ -56,19 +60,6 @@ pub trait IntoLLVM<'ctx> {
     fn into_llvm(self, context: &'ctx inkwell::context::Context) -> Self::Output;
 }
 
-use crate::{
-    ast::{ASTNode, Parameter, Statement},
-    types::Type,
-};
-use inkwell::{
-    builder::Builder,
-    context::Context,
-    module::Module,
-    types::BasicTypeEnum,
-    values::{BasicValueEnum, FunctionValue},
-};
-use std::collections::HashMap;
-
 pub struct CodeGeneratorImpl<'ctx> {
     context: &'ctx Context,
     module: Module<'ctx>,
@@ -91,7 +82,7 @@ impl<'ctx> CodeGeneratorImpl<'ctx> {
         }
     }
 
-    pub fn generate(&mut self, ast: &ASTNode) -> Result<(), IoError> {
+    pub fn generate(&mut self, ast: &ASTNode) -> Result<()> {
         match ast {
             ASTNode::Program(nodes) => {
                 for node in nodes {
@@ -153,7 +144,7 @@ impl<'ctx> CodeGeneratorImpl<'ctx> {
         return_type: &Option<String>,
         body: &[ASTNode],
         is_async: bool,
-    ) -> Result<(), IoError> {
+    ) -> Result<()> {
         let fn_type = self.context.i32_type().fn_type(&[], false);
         let function = self.module.add_function(name, fn_type, None);
         let basic_block = self.context.append_basic_block(function, "entry");
@@ -179,7 +170,7 @@ impl<'ctx> CodeGeneratorImpl<'ctx> {
         Ok(())
     }
 
-    fn generate_statement(&mut self, node: &ASTNode) -> Result<(), IoError> {
+    fn generate_statement(&mut self, node: &ASTNode) -> Result<()> {
         match node {
             ASTNode::Let { name, value } => {
                 let value = self.generate_expression(value)?;
@@ -205,9 +196,9 @@ impl<'ctx> CodeGeneratorImpl<'ctx> {
         }
     }
 
-    fn generate_expression(&mut self, node: &ASTNode) -> Result<BasicValueEnum<'ctx>, IoError> {
+    fn generate_expression(&mut self, node: &ASTNode) -> Result<BasicValueEnum<'ctx>> {
         match node {
-            ASTNode::IntegerLiteral(value) => Ok(self
+            ASTNode::Number(value) => Ok(self
                 .context
                 .i32_type()
                 .const_int(*value as u64, false)
@@ -251,7 +242,7 @@ impl<'ctx> CodeGeneratorImpl<'ctx> {
         condition: &ASTNode,
         then_branch: &[ASTNode],
         else_branch: &Option<Vec<ASTNode>>,
-    ) -> Result<(), IoError> {
+    ) -> Result<()> {
         let function = self
             .builder
             .get_insert_block()
@@ -292,7 +283,7 @@ impl<'ctx> CodeGeneratorImpl<'ctx> {
         &mut self,
         name: &str,
         args: &[ASTNode],
-    ) -> Result<BasicValueEnum<'ctx>, IoError> {
+    ) -> Result<BasicValueEnum<'ctx>> {
         let function = self
             .module
             .get_function(name)
@@ -312,7 +303,7 @@ impl<'ctx> CodeGeneratorImpl<'ctx> {
             .unwrap())
     }
 
-    pub fn verify_module(&self) -> Result<(), IoError> {
+    pub fn verify_module(&self) -> Result<()> {
         if self.module.verify().is_err() {
             return Err(IoError::runtime_error("Module verification failed"));
         }
@@ -324,8 +315,6 @@ impl<'ctx> CodeGeneratorImpl<'ctx> {
             Type::I32 => Ok(self.context.i32_type().into()),
             Type::I64 => Ok(self.context.i64_type().into()),
             Type::F32 => Ok(self.context.f32_type().into()),
-            Type::F64 => Ok(self.context.f64_type().into()),
-            Type::Bool => Ok(self.context.bool_type().into()),
             Type::String => Ok(self.context.ptr_type(inkwell::AddressSpace::Generic).into()),
             Type::Array(elem_ty) => {
                 let llvm_ty = self.get_llvm_type(elem_ty)?;
@@ -334,278 +323,205 @@ impl<'ctx> CodeGeneratorImpl<'ctx> {
             _ => Err(IoError::type_error("Unsupported type")),
         }
     }
-}
 
-use crate::{ast::Module as AstModule, error::Result};
-use inkwell::{
-    builder::Builder,
-    context::Context,
-    module::Module,
-    types::BasicTypeEnum,
-    values::{BasicValueEnum, FunctionValue},
-};
-
-pub struct CodeGenerator<'ctx> {
-    context: &'ctx Context,
-    module: Module<'ctx>,
-    builder: Builder<'ctx>,
-}
-
-impl<'ctx> CodeGenerator<'ctx> {
-    pub fn new(context: &'ctx Context, module_name: &str) -> Self {
-        let module = context.create_module(module_name);
-        let builder = context.create_builder();
-
-        Self {
-            context,
-            module,
-            builder,
+    fn verify_debug_info(&self) -> Result<()> {
+        if !self.options.debug_info {
+            return Ok(());
         }
-    }
-
-    pub fn generate(&self, ast: &AstModule) -> Result<()> {
-        // Generate LLVM IR for the module
-        self.declare_global_functions()?;
-
-        for function in ast.functions() {
-            self.generate_function(function)?;
-        }
-
-        // Verify the generated module
-        if self.module.verify().is_err() {
-            return Err("Invalid LLVM module generated".into());
-        }
-
-        Ok(())
-    }
-
-    fn generate_function(&self, func: &Function) -> Result<FunctionValue<'ctx>> {
-        let fn_type = self.get_function_type(func);
-        let function = self.module.add_function(&func.name, fn_type, None);
-
-        let entry = self.context.append_basic_block(function, "entry");
-        self.builder.position_at_end(entry);
-
-        // Generate function body
-        self.generate_statements(&func.body)?;
-
-        Ok(function)
-    }
-
-    fn get_llvm_type(&self, ty: &Type) -> BasicTypeEnum<'ctx> {
-        match ty {
-            Type::I32 => self.context.i32_type().into(),
-            Type::I64 => self.context.i64_type().into(),
-            Type::F32 => self.context.f32_type().into(),
-            Type::F64 => self.context.f64_type().into(),
-            Type::Void => self.context.void_type().into(),
-            Type::Bool => self.context.bool_type().into(),
-            Type::String => self
-                .context
-                .i8_type()
-                .ptr_type(AddressSpace::Generic)
-                .into(),
-            Type::Array(ty) => {
-                let llvm_ty = self.get_llvm_type(ty);
-                llvm_ty.array_type(0).into()
-            }
-            Type::Function { params, ret_ty } => {
-                let param_types: Vec<_> = params.iter().map(|ty| self.get_llvm_type(ty)).collect();
-                let ret_type = self.get_llvm_type(ret_ty);
-                ret_type.fn_type(&param_types, false).into()
-            }
-            Type::Struct { fields } => {
-                let field_types: Vec<_> = fields.iter().map(|ty| self.get_llvm_type(ty)).collect();
-                self.context.struct_type(&field_types, false).into()
-            }
-            Type::Pointer(ty) => {
-                let llvm_ty = self.get_llvm_type(ty);
-                llvm_ty.ptr_type(AddressSpace::Generic).into()
-            }
-            Type::Unknown => self.context.i8_type().into(),
-        }
-    }
-
-    fn declare_global_functions(&self) -> Result<()> {
-        // Declare standard library functions
-        self.declare_print_function()?;
-        self.declare_malloc_function()?;
-        self.declare_free_function()?;
-
-        // Declare runtime support functions
-        self.declare_runtime_functions()?;
-
-        Ok(())
-    }
-
-    fn declare_print_function(&self) -> Result<()> {
-        let i8_ptr = self.context.i8_type().ptr_type(AddressSpace::Generic);
-        let print_type = self.context.void_type().fn_type(&[i8_ptr.into()], false);
-        self.module.add_function("print", print_type, None);
-        Ok(())
-    }
-
-    fn declare_runtime_functions(&self) -> Result<()> {
-        // Memory management functions
-        let void_type = self.context.void_type();
-        let i64_type = self.context.i64_type();
-        let i8_ptr = self.context.i8_type().ptr_type(AddressSpace::Generic);
-
-        // Runtime initialization
-        self.module
-            .add_function("rt_init", void_type.fn_type(&[], false), None);
-
-        // Thread local storage
-        self.module
-            .add_function("rt_get_tls", i8_ptr.fn_type(&[], false), None);
-
-        // Exception handling
-        self.declare_exception_functions(i8_ptr, void_type)?;
-
-        // Garbage collection
-        self.declare_gc_functions(i8_ptr, i64_type, void_type)?;
-
-        Ok(())
-    }
-
-    fn declare_exception_functions(
-        &self,
-        i8_ptr: PointerType<'ctx>,
-        void_type: VoidType<'ctx>,
-    ) -> Result<()> {
-        // Exception throwing
-        self.module
-            .add_function("rt_throw", void_type.fn_type(&[i8_ptr.into()], false), None);
-
-        // Try-catch support
-        self.module
-            .add_function("rt_try_begin", i8_ptr.fn_type(&[], false), None);
-
-        self.module.add_function(
-            "rt_try_end",
-            void_type.fn_type(&[i8_ptr.into()], false),
-            None,
-        );
-
-        Ok(())
-    }
-
-    fn declare_gc_functions(
-        &self,
-        i8_ptr: PointerType<'ctx>,
-        i64_type: IntType<'ctx>,
-        void_type: VoidType<'ctx>,
-    ) -> Result<()> {
-        // Allocation
-        self.module.add_function(
-            "rt_gc_alloc",
-            i8_ptr.fn_type(&[i64_type.into()], false),
-            None,
-        );
-
-        // Collection control
-        self.module
-            .add_function("rt_gc_collect", void_type.fn_type(&[], false), None);
-
-        // Root management
-        self.module.add_function(
-            "rt_gc_root_push",
-            void_type.fn_type(&[i8_ptr.into()], false),
-            None,
-        );
-
-        self.module
-            .add_function("rt_gc_root_pop", void_type.fn_type(&[], false), None);
-
-        Ok(())
-    }
-
-    fn generate_statements(&self, statements: &[Statement]) -> Result<()> {
-        for stmt in statements {
-            match stmt {
-                Statement::Expression(expr) => {
-                    self.generate_expression(expr)?;
-                }
-                Statement::Return(expr) => {
-                    let value = if let Some(expr) = expr {
-                        self.generate_expression(expr)?
-                    } else {
-                        self.context.void_type().const_zero().into()
-                    };
-                    self.builder.build_return(Some(&value));
-                }
-                Statement::Let { name, init, ty } => {
-                    let value = self.generate_expression(init)?;
-                    let alloca = self.create_local_variable(name, ty.as_ref(), value)?;
-                    self.variables.insert(name.clone(), alloca);
-                } // Add other statement types...
-            }
+        // Add debug info verification logic
+        if self.module.get_di_compile_unit().is_none() {
+            return Err(IoError::codegen_error("No DI compile unit found"));
         }
         Ok(())
     }
-
-    fn create_local_variable(
-        &self,
-        name: &str,
-        ty: Option<&Type>,
-        value: BasicValueEnum<'ctx>,
-    ) -> Result<PointerValue<'ctx>> {
-        let var_type = if let Some(ty) = ty {
-            self.get_llvm_type(ty)
-        } else {
-            value.get_type()
-        };
-
-        let alloca = self.builder.build_alloca(var_type, name);
-        self.builder.build_store(alloca, value);
-        Ok(alloca)
-    }
-
-    fn get_function_type(&self, func: &Function) -> inkwell::types::FunctionType<'ctx> {
-        let return_type = match &func.return_type {
-            Some(ty) => self.get_llvm_type(ty),
-            None => self.context.void_type().into(),
-        };
-
-        let param_types: Vec<_> = func
-            .parameters
-            .iter()
-            .map(|param| self.get_llvm_type(&param.r#type)) // Fix: use r#type to escape keyword
-            .collect();
-
-        return_type.fn_type(&param_types, false)
-    }
-}
-
-pub struct LLVMGenerator<'ctx> {
-    context: &'ctx Context,
-    module: Module<'ctx>,
-    builder: Builder<'ctx>,
 }
 
 impl<'ctx> CodeGenerator for LLVMGenerator<'ctx> {
     fn initialize(&mut self) -> Result<()> {
-        // Implementation
+        // Initialize target machine
+        let target_triple = inkwell::targets::TargetMachine::get_default_triple();
+        inkwell::targets::Target::initialize_all(&inkwell::targets::InitializationConfig::default());
+
+        let target = inkwell::targets::Target::from_triple(&target_triple)
+            .map_err(|e| IoError::codegen_error(format!("Failed to get target: {}", e)))?;
+
+        self.target_machine = Some(
+            target
+                .create_target_machine(
+                    &target_triple,
+                    "generic",
+                    "",
+                    OptimizationLevel::Default,
+                    inkwell::targets::RelocMode::Default,
+                    inkwell::targets::CodeModel::Default,
+                )
+                .ok_or_else(|| IoError::codegen_error("Failed to create target machine"))?,
+        );
+
+        // Initialize pass manager
+        self.pass_manager = PassManager::create(&self.module);
+        self.pass_manager.add_instruction_combining_pass();
+        self.pass_manager.add_reassociate_pass();
+        self.pass_manager.add_gvn_pass();
+        self.pass_manager.add_cfg_simplification_pass();
+        self.pass_manager.initialize();
+
         Ok(())
     }
 
-    fn generate_module(&mut self, ast: &crate::ast::Module) -> Result<()> {
-        // Implementation
+    fn generate_module(&mut self, ast: &Module) -> Result<()> {
+        // Generate declarations
+        for decl in ast.declarations() {
+            match decl {
+                Declaration::Function(func) => self.generate_function(func)?,
+                Declaration::Struct(struct_def) => self.generate_struct(struct_def)?,
+                Declaration::Import(import) => self.process_import(import)?,
+                Declaration::Global(global) => self.generate_global(global)?,
+            }
+        }
+
+        // Generate function implementations
+        for func in ast.functions() {
+            self.generate_function_body(func)?;
+        }
+
+        // Generate initialization code
+        self.generate_module_init()?;
+
         Ok(())
     }
 
     fn write_output<P: AsRef<Path>>(&self, path: P) -> Result<()> {
-        // Implementation
+        let target_machine = self
+            .target_machine
+            .as_ref()
+            .ok_or_else(|| IoError::codegen_error("Target machine not initialized"))?;
+
+        // Write object file
+        target_machine
+            .write_to_file(
+                &self.module,
+                inkwell::targets::FileType::Object,
+                path.as_ref(),
+            )
+            .map_err(|e| IoError::codegen_error(format!("Failed to write output: {}", e)))?;
+
+        // Write LLVM IR if debug mode is enabled
+        if self.options.emit_llvm_ir {
+            let ir_path = path.as_ref().with_extension("ll");
+            self.module
+                .print_to_file(&ir_path)
+                .map_err(|e| IoError::codegen_error(format!("Failed to write LLVM IR: {}", e)))?;
+        }
+
         Ok(())
     }
 
     fn optimize(&mut self) -> Result<()> {
-        // Implementation
+        // Run module-level optimizations
+        self.pass_manager.run_on(&self.module);
+
+        // Run function-level optimizations
+        for function in self.module.get_functions() {
+            // Skip external functions
+            if function.is_declaration() {
+                continue;
+            }
+
+            let func_pass_manager = PassManager::create(&self.module);
+
+            //  Add optimization passes based on optimization level
+            match self.options.optimization_level {
+                OptimizationLevel::Aggressive => {
+                    func_pass_manager.add_instruction_combining_pass();
+                    func_pass_manager.add_reassociate_pass();
+                    func_pass_manager.add_gvn_pass();
+                    func_pass_manager.add_cfg_simplification_pass();
+                    func_pass_manager.add_basic_alias_analysis_pass();
+                    func_pass_manager.add_promote_memory_to_register_pass();
+                    func_pass_manager.add_tail_call_elimination_pass();
+                    func_pass_manager.add_ind_var_simplify_pass();
+                    func_pass_manager.add_loop_unroll_pass();
+                    func_pass_manager.add_loop_vectorize_pass();
+                    func_pass_manager.add_dead_code_elimination_pass();
+                }
+                OptimizationLevel::Default => {
+                    func_pass_manager.add_instruction_combining_pass();
+                    func_pass_manager.add_reassociate_pass();
+                    func_pass_manager.add_gvn_pass();
+                    func_pass_manager.add_cfg_simplification_pass();
+                    func_pass_manager.add_dead_code_elimination_pass();
+                    func_pass_manager.add_correlated_value_propagation_pass();
+                }
+                OptimizationLevel::Less => {
+                    func_pass_manager.add_instruction_combining_pass();
+                    func_pass_manager.add_cfg_simplification_pass();
+                }
+                OptimizationLevel::None => {}
+            }
+
+            func_pass_manager.run_on(&function);
+        }
+
         Ok(())
     }
 
     fn verify(&self) -> Result<()> {
-        // Implementation
+        // Verify module structure
+        if let Err(err) = self.module.verify() {
+            return Err(IoError::codegen_error(format!(
+                "Module verification failed: {}",
+                err
+            )));
+        }
+
+        // Verify each function
+        for function in self.module.get_functions() {
+            if !function.verify(true) {
+                return Err(IoError::codegen_error(format!(
+                    "Function verification failed: {}",
+                    function.get_name().to_string_lossy()
+                )));
+            }
+        }
+
+        // Verify types
+        self.verify_types()?;
+
+        // Verify debug info if enabled
+        if self.options.debug_info {
+            self.verify_debug_info()?;
+        }
+
+        Ok(())
+    }
+}
+
+// Helper method for type validation
+impl<'ctx> LLVMGenerator<'ctx> {
+    fn verify_types(&self) -> Result<()> {
+        for ty in self.module.get_types() {
+            if ty.is_struct_type() {
+                let struct_ty = ty.into_struct_type();
+                if struct_ty.get_name().is_none() {
+                    return Err(IoError::codegen_error("Anonymous struct type found"));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn verify_debug_info(&self) -> Result<()> {
+        if !self.options.debug_info {
+            return Ok(());
+        }
+        // Add debug info verification logic
+        if self.module.get_debug_metadata_version() == 0 {
+            return Err(IoError::codegen_error("No debug metadata found"));
+        }
+        if self.module.get_di_compile_unit().is_none() {
+            return Err(IoError::codegen_error("No DI compile unit found"));
+        }
         Ok(())
     }
 }
