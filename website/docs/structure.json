@@ -1,0 +1,92 @@
+{
+    "defaultDoc": "getting-started/installation",
+    "categories": {
+        "getting-started": [
+            {
+                "file": "installation",
+                "title": "Installation Guide",
+                "description": "Comprehensive guide for setting up the development environment"
+            },
+            {
+                "file": "quickstart",
+                "title": "Quick Start Guide",
+                "description": "Getting started with basic examples and project structure"
+            }
+        ],
+        "core": [
+            {
+                "file": "type-system",
+                "title": "Type System",
+                "description": "Detailed explanation of the type system and its features"
+            },
+            {
+                "file": "functions",
+                "title": "Functions",
+                "description": "In-depth guide to functions, closures, and advanced patterns"
+            }
+        ],
+        "advanced": [
+            {
+                "file": "concurrency",
+                "title": "Concurrency",
+                "description": "Thread management, async runtime, and synchronization primitives"
+            },
+            {
+                "file": "error-handling",
+                "title": "Error Handling",
+                "description": "Comprehensive error handling patterns and best practices"
+            },
+            {
+                "file": "performance",
+                "title": "Performance Optimization",
+                "description": "SIMD operations, profiling, and optimization techniques"
+            },
+            {
+                "file": "memory-management",
+                "title": "Memory Management",
+                "description": "Memory safety, ownership, and advanced memory patterns"
+            }
+        ],
+        "deployment": [
+            {
+                "file": "production-setup",
+                "title": "Production Setup",
+                "description": "Guidelines for production deployment and monitoring"
+            },
+            {
+                "file": "security",
+                "title": "Security Guidelines",
+                "description": "Security best practices and considerations"
+            }
+        ],
+        "tooling": [
+            {
+                "file": "debugging",
+                "title": "Debugging Tools",
+                "description": "Debug tooling and troubleshooting guides"
+            },
+            {
+                "file": "profiling",
+                "title": "Profiling Tools",
+                "description": "Performance profiling and analysis tools"
+            }
+        ]
+    },
+    "metadata": {
+        "version": "1.0.0",
+        "lastUpdated": "2024-01-20",
+        "contributors": [
+            "Gamecooler19",
+            "Documentation Team"
+        ]
+    },
+    "search": {
+        "enableFullText": true,
+        "indexDepth": 3
+    },
+    "navigation": {
+        "showBreadcrumbs": true,
+        "showToc": true,
+        "maxDepth": 3
+    }
+}
