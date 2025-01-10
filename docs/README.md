@@ -1,6 +1,6 @@
 # Io Programming Language Documentation
 
-Welcome to the improved **Io** documentation. This guide provides a comprehensive overview of the language, from basic concepts to advanced techniques. Whether you are brand new to Io or an experienced user, these resources will help you build robust and maintainable applications.
+Welcome to the **Io** documentation. This guide provides a comprehensive overview of the language, from basic concepts to advanced techniques. Whether you are brand new to Io or an experienced user, these resources will help you build robust and maintainable applications.
 
 ## Contents
 
